@@ -1,0 +1,124 @@
+services:
+  php:
+    container_name: nexstage-php
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+      args:
+        PHP_VERSION: 8.5
+    restart: unless-stopped
+    user: "${UID}:${GID}"
+    environment:
+      APACHE_RUN_USER: '#${UID}'
+      APACHE_RUN_GROUP: '#${GID}'
+    volumes:
+      - ./:/var/www/html
+      - ./php.ini:/usr/local/etc/php/conf.d/zz-php.ini
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - nexstage
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik"
+      - "traefik.http.routers.nexstage.rule=Host(`nexstage.dev.localhost`)"
+      - "traefik.http.routers.nexstage.entrypoints=websecure"
+      - "traefik.http.routers.nexstage.tls=true"
+      - "traefik.http.services.nexstage.loadbalancer.server.port=80"
+
+  horizon:
+    container_name: nexstage-horizon
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+      args:
+        PHP_VERSION: 8.5
+    restart: unless-stopped
+    user: "${UID}:${GID}"
+    command: php artisan horizon
+    volumes:
+      - ./:/var/www/html
+      - ./php.ini:/usr/local/etc/php/conf.d/zz-php.ini
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - nexstage
+
+  postgres:
+    container_name: nexstage-postgres
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nexstage
+      POSTGRES_USER: nexstage
+      POSTGRES_PASSWORD: secret
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - nexstage
+
+  redis:
+    container_name: nexstage-redis
+    image: redis:8-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes --appendfsync everysec
+    volumes:
+      - redis_data:/data
+    networks:
+      - nexstage
+
+  mailpit:
+    container_name: nexstage-mailpit
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    environment:
+      MP_UI_BIND_ADDR: 0.0.0.0:8025
+    networks:
+      - nexstage
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik"
+      - "traefik.http.routers.nexstage-mail.rule=Host(`mail-nexstage.dev.localhost`)"
+      - "traefik.http.routers.nexstage-mail.entrypoints=websecure"
+      - "traefik.http.routers.nexstage-mail.tls=true"
+      - "traefik.http.services.nexstage-mail.loadbalancer.server.port=8025"
+
+  pgadmin:
+    container_name: nexstage-pgadmin
+    image: dpage/pgadmin4:latest
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@nexstage.dev
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: 'False'
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres
+    networks:
+      - nexstage
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik"
+      - "traefik.http.routers.nexstage-pgadmin.rule=Host(`pgadmin-nexstage.dev.localhost`)"
+      - "traefik.http.routers.nexstage-pgadmin.entrypoints=websecure"
+      - "traefik.http.routers.nexstage-pgadmin.tls=true"
+      - "traefik.http.services.nexstage-pgadmin.loadbalancer.server.port=80"
+
+networks:
+  nexstage:
+    driver: bridge
+  traefik:
+    external: true
+
+volumes:
+  postgres_data:
+  redis_data:
+  pgadmin_data:

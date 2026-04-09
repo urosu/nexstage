@@ -1,1198 +1,1195 @@
-# Metrify — Full Planning Reference
+# Nexstage — Full Product Plan (Research-Validated)
 
-**Purpose:** This is the comprehensive planning document. It contains every business decision, technical rationale, competitor research, infrastructure philosophy, and full phase 2 specifications. When you need to understand *why* a decision was made, this is the source of truth.
+## Context
 
-**For Claude Code:** Read `CLAUDE.md` to build. Come here when you need deeper context on a decision or want to understand the business model.
+Pre-launch, no live users. Full freedom to redesign schema, navigation, and features. Based on extensive market research and competitive analysis, the plan has been restructured around validated positioning.
 
-Working name: **Metrify**. Find-and-replace when a final name is chosen.
+**Core thesis:** Paid ads + organic search + site performance + ecommerce data in one unified view — no competitor covers all four pillars for WooCommerce SMBs.
 
----
+**Defensible wedges (validated by research):**
+1. WooCommerce-native depth (most serious competitors are Shopify-first)
+2. Site health as a first-class ecommerce signal (no major agency tool includes it)
+3. Cross-channel anomaly correlation with narrative root-cause explanation (nobody ships this well)
+4. EU/GDPR positioning (most competitors are US-based)
 
-## What Metrify Is
+**Product framing:** Not a dashboard tool — a diagnostic tool. Every feature evaluated against: "does this help answer 'why did my revenue change?' faster?"
 
-Multi-tenant SaaS analytics platform for ecommerce store owners. Connects stores (WooCommerce MVP, Shopify Phase 2) and ad platforms (Facebook Ads, Google Ads, Google Search Console) to provide a unified view of **sales analytics, advertising ROI, and organic search visibility** — all in one dashboard.
-
-**Target user:** EU-based ecommerce store owners and marketing managers running DTC (direct-to-consumer) brands. From growing SMBs doing €2k/month to established brands doing €200k+/month. Common profile: selling on WooCommerce or Shopify, running Facebook and Google ads, investing in SEO. Currently juggling 3-5 separate tools with no unified view.
-
-**The core problem:** Store owners use GA4 for traffic, Facebook Ads Manager for ads, WooCommerce admin for orders, and GSC for SEO — and none of these talk to each other. They can't answer "what was my ROAS yesterday?" without opening four tabs and doing math in a spreadsheet.
-
-**Our answer:** Pull all this data into one place. One dashboard, one currency, one date range, one "how did yesterday go?" view.
+**Do NOT compete on:** integration count (AgencyAnalytics has 80+), SEO tool bundles (rank trackers, backlinks), report-building flexibility (mature drag-and-drop editors). Stay narrow, go deep.
 
 ---
 
-## Business Model
+## What to Keep
 
-**Hybrid revenue-based pricing.** Two distinct tiers based on store GMV:
-
-### Flat Tiers (< €10k/month GMV)
-For stores where predictable pricing matters. They're scrappy, budget-conscious.
-| Tier | Monthly GMV | Monthly Price |
-|---|---|---|
-| Starter | ≤ €2,000 | €29 |
-| Growth | ≤ €5,000 | €59 |
-| Scale | ≤ €10,000 | €119 |
-
-### Percentage Model (≥ €10k/month GMV)
-For serious stores. Pricing grows with them — we succeed when they succeed.
-- **1% of previous month's gross revenue**
-- Minimum €149/mo (floor protects us if a big store has a slow month)
-- Custom/Enterprise above €250k/month GMV
-
-**Why this model?**
-- Flat SaaS pricing ($99/mo for everyone) leaves huge money on the table for large stores. A store doing €100k/month pays the same as one doing €5k.
-- Pure percentage is unpredictable for small stores and creates friction.
-- The hybrid captures both markets: predictability for smalls, aligned incentives for bigs.
-- Similar to Klaviyo's contact-count scaling, but revenue-based which is more natural for ecommerce.
-
-**Annual discount:** 2 months free (~17% discount). Applies only to flat tiers. The % model is already monthly by nature.
-
-**Trial:** 14 days, all features, no credit card. After trial: syncs pause, data retained, redirect to billing. 14 days is enough to see value if they have 30+ days of historical orders imported.
+- Tech stack: Laravel 12 + Inertia.js + React 19 + TypeScript + Tailwind
+- Multi-tenant architecture: WorkspaceContext singleton, SetActiveWorkspace middleware, WorkspaceScope global scope
+- Queue architecture: Horizon + Redis (4 supervisors: critical/high/default/low)
+- OAuth integration code: WooCommerce, Facebook Ads, Google Ads, GSC (service classes + jobs)
+- Component library: MetricCard, DateRangePicker, LineChart, MultiSeriesLineChart, AppLayout
+- Billing foundation: Laravel Cashier + Stripe (restructure tiers, keep Cashier)
 
 ---
 
-## Technology Decisions
+## Database Schema — Complete Redesign
 
-### Why PostgreSQL (not MySQL)
-- **JSONB columns** for `revenue_by_country`, `top_products`, `billing_address`, `platform_webhook_ids` — MySQL's JSON support is weaker
-- **Partial indexes** on `ad_insights` — critical for the partial unique index pattern by level and hour. MySQL does not support partial indexes.
-- **`bigserial`** auto-increment type — cleaner than MySQL's `AUTO_INCREMENT`
-- **Expression indexes** — `COALESCE(variant_name, '')` index on `order_items` for upsert deduplication
-- Version 18.x is current stable with performance improvements over 16.x.
+### Problems in Current Schema (fix in Phase 0)
 
-### Why Redis (not database queue)
-Laravel's database queue driver creates contention. Redis is purpose-built for this. AOF persistence means no jobs lost on reboot.
+1. **`daily_snapshots.top_products` and `revenue_by_country` are JSONB blobs** — cannot filter/sort/join at DB level. `revenue_by_country` is redundant (derivable from orders). `top_products` must be normalized.
+2. **`order_items` redundantly stores `workspace_id` and `store_id`** — derivable via order_id.
+3. **`gsc_pages.page VARCHAR(2000)` unique constraint** — massive index. Replace with TEXT + `page_hash CHAR(64)` (SHA-256).
+4. **`ad_insights` nullable FKs with no CHECK constraints** — level/FK integrity not enforced.
+5. **`alerts` has no `source` column** — can't distinguish system/rule/AI alerts.
+6. **Missing indexes** on orders(workspace_id, status, occurred_at), orders(workspace_id, shipping_country) (for countries page), products(workspace_id, store_id, status), stores(workspace_id, platform_store_id).
+7. **`stores.platform_webhook_ids` JSONB** — should be a proper table.
 
-### Why Inertia.js (not API + SPA)
-We don't need a public API. We don't need separate frontend deployment. Inertia gives us: server-side routing, Laravel's auth/session/middleware, and React for the UI — without the complexity of a decoupled SPA. The tradeoff is that we can't easily offer a mobile app later (Phase 3), but that's acceptable.
+### Schema Changes to Existing Tables
 
-### Why Recharts (not Chart.js, D3, Highcharts)
-- Recharts is React-native (composable React components). Chart.js/Highcharts are imperative libraries wrapped in React.
-- Our heaviest chart is ~2,160 points (hourly, 90 days). Recharts handles up to ~10,000 points with memoisation. No performance issue.
-- Recharts has a permissive license (MIT). Highcharts requires commercial license.
+**`orders`** — add columns:
+- `payment_method VARCHAR(100) NULL`
+- `payment_method_title VARCHAR(255) NULL`
+- `shipping_country CHAR(3) NULL`
+- `refund_amount DECIMAL(12,2) NOT NULL DEFAULT 0`
+- `last_refunded_at TIMESTAMP NULL`
+- `customer_id VARCHAR(255) NULL` (WooCommerce per-store user ID — NOT globally unique, always query with store_id. Kept alongside customer_email_hash which serves as the privacy-preserving cross-store dedup key)
+- INDEX(store_id, customer_id) — composite, since customer_id is per-store
+- `utm_term VARCHAR(500) NULL`
+- `raw_meta JSONB NULL` (fee_lines, order_notes, etc.)
+- `raw_meta_api_version VARCHAR(20) NULL`
 
-### Why Horizon (not just Redis queues)
-Horizon provides: real-time dashboard to see queued/processed/failed jobs, automatic balancing across queues, supervisord-style process management, retry management. Essential for debugging sync failures in production.
+**`products`** — add columns:
+- `stock_status VARCHAR(50) NULL` (in_stock, out_of_stock, on_backorder)
+- `stock_quantity INT NULL`
+- `product_type VARCHAR(50) NULL` (simple, variable, grouped, external)
 
-### Why shadcn/ui
-Not a component library in the traditional sense — it's a collection of copy-paste components built on Radix UI primitives. We own the code, can customise freely, and the components are accessible and production-quality. Tailwind-native.
+**`campaigns`** — add columns:
+- `daily_budget DECIMAL(12,2) NULL`
+- `lifetime_budget DECIMAL(12,2) NULL`
+- `budget_type VARCHAR(20) NULL` (daily, lifetime)
+- `bid_strategy VARCHAR(100) NULL`
+- `target_value DECIMAL(12,2) NULL`
 
-### Why the WorkspaceContext singleton (not session in scopes)
-Global scopes (`WorkspaceScope`) run in queue jobs and CLI commands where there is no session. If we stored the workspace ID in `session()` and read it in the scope, jobs would fail silently with no workspace context. The singleton in the service container is set explicitly at the start of each job `handle()` call — it's explicit, auditable, and works everywhere.
+**`ads`** — add columns:
+- `effective_status VARCHAR(100) NULL` (real column, not JSONB — needed for correlation engine)
+- `creative_data JSONB NULL` (images, headlines, descriptions, thumbnails)
+- `creative_data_api_version VARCHAR(20) NULL`
 
-### Why throw in WorkspaceScope when context is null
-Silent fallback (`if ($id) { query }`) would return ALL data across all workspaces if a job forgot to call `set()`. This is a critical cross-tenant data leak. Throwing forces the developer to explicitly set context — the error is loud and caught immediately in tests, not silently in production.
+**`ad_insights`** — add columns:
+- `frequency DECIMAL(5,2) NULL` (Facebook: avg times person saw ad)
+- `platform_conversions DECIMAL(12,2) NULL` (platform-reported conversions)
+- `platform_conversions_value DECIMAL(14,4) NULL` (platform-reported conversion value)
+- `search_impression_share DECIMAL(5,4) NULL` (Google Ads)
+- `raw_insights JSONB NULL` (Facebook actions array, placement breakdowns, etc.)
+- `raw_insights_api_version VARCHAR(20) NULL`
+- Add CHECK constraint: `(level = 'campaign' AND campaign_id IS NOT NULL AND ad_id IS NULL) OR (level = 'ad' AND ad_id IS NOT NULL AND campaign_id IS NULL)` — Note: if adset-level insights are added later (Phase 3+), this constraint must be extended. Add a code comment in the migration.
 
----
+**`gsc_daily_stats`** — add columns:
+- `device VARCHAR(10) NOT NULL DEFAULT 'all'` (mobile, desktop, tablet, or 'all' for aggregate)
+- `country CHAR(3) NOT NULL DEFAULT 'ZZ'` ('ZZ' = aggregated/unknown)
+- Update unique constraint to include device + country. Use NOT NULL with sentinel values because PostgreSQL treats NULL as distinct in unique constraints.
 
-## FX Rates
+**`gsc_queries`** — add columns:
+- `device VARCHAR(10) NOT NULL DEFAULT 'all'`
+- `country CHAR(3) NOT NULL DEFAULT 'ZZ'`
+- Update unique constraint to include device + country
 
-### Why Frankfurter (not Open Exchange Rates, not ECB directly)
-- **Free with no API key.** No monthly/daily quotas. Rate-limited only to prevent abuse.
-- **ECB-sourced rates.** The European Central Bank publishes official reference rates — appropriate for EU-focused ecommerce analytics.
-- **Date range queries.** One API call returns all dates in a range: `GET /v2/rates?from={start}&to={end}&base=EUR`. Critical for historical import pre-population.
-- **Self-hostable.** Can run the Docker image if API becomes unreliable or if volume becomes an issue.
-- Alternative: Open Exchange Rates has a 1,000 request/month limit on free tier — useless for a multi-workspace SaaS.
+**`gsc_pages`** — change `page VARCHAR(2000)` to `page TEXT` + add `page_hash CHAR(64)`, unique on `(property_id, date, page_hash, device, country)`
+- Add `device VARCHAR(10) NOT NULL DEFAULT 'all'` — NOT NULL with sentinel value 'all' (PostgreSQL treats NULL as distinct in unique constraints, so nullable columns would allow duplicate rows)
+- Add `country CHAR(3) NOT NULL DEFAULT 'ZZ'` — 'ZZ' = aggregated/unknown (same NULL-in-unique issue)
 
-### Why DB-first caching
-The Frankfurter API is reliable but external. Dashboard queries should never depend on an external API call. We cache all rates in `fx_rates` table. FxRateService reads from DB only. Two flows populate the DB:
-1. `UpdateFxRatesJob` runs daily at 06:00 UTC — fetches today's rates
-2. Historical import pre-populates missing dates before processing orders
+**`alerts`** — add columns:
+- `source VARCHAR(50) DEFAULT 'system'` CHECK (source IN ('system', 'rule', 'ai'))
+- `property_id BIGINT FK search_console_properties NULL`
+- `is_silent BOOLEAN DEFAULT false`
+- `review_status VARCHAR(50) NULL` (unreviewed, true_positive, false_positive, correct_but_uninteresting)
+- `reviewed_at TIMESTAMP NULL`
+- `estimated_impact_low DECIMAL(12,2) NULL`
+- `estimated_impact_high DECIMAL(12,2) NULL`
+- `gsc_conversion_rate_at_alert DECIMAL(8,6) NULL` (audit trail)
+- `store_aov_at_alert DECIMAL(12,2) NULL` (audit trail)
 
-### Why EUR as base currency
-EUR is the most natural base for an EU-focused product. Most WooCommerce stores in our target market use EUR. The ECB publishes EUR-based rates. Storing EUR→X means: `EUR store + GBP reporting` = one direct lookup. `GBP store + EUR reporting` = one lookup + invert. `GBP store + USD reporting` = two lookups + divide. All cases handled by the four-case FxRateService logic.
+**`stores`** — add `website_url VARCHAR(500) NULL` (main store domain — used for country detection from TLD, PSI homepage auto-creation, webhook URL base. NOT the same as store_urls which are specific pages to monitor). Drop `platform_webhook_ids` JSONB.
 
-### Why per-transaction-date rates (not single rate for period)
-Industry standard confirmed by research into how Klaviyo handles multi-currency: "For each individual Placed Order event, Klaviyo converts revenue into USD using the up-to-date exchange rate for the day of the transaction." This is correct — a €100 order on Jan 1st and a €100 order on Dec 31st have different GBP values because exchange rates move.
+**`workspaces`** — add columns:
+- `has_store BOOLEAN DEFAULT false`
+- `has_ads BOOLEAN DEFAULT false`
+- `has_gsc BOOLEAN DEFAULT false`
+- `has_psi BOOLEAN DEFAULT false`
+- `country CHAR(2) NULL` (ISO 3166-1 alpha-2, for holiday context)
+- `region VARCHAR(100) NULL` (optional, for sub-national holidays)
+- `timezone VARCHAR(50) NULL` (e.g. 'Europe/Berlin' — auto-detected from country, used for quiet hours + schedule display. Separate from reporting_timezone which controls data aggregation.)
+- Update `billing_plan` CHECK: `('starter', 'growth', 'scale', 'enterprise')`
 
----
+**`daily_snapshots`** — drop `top_products` JSONB and `revenue_by_country` JSONB columns.
 
-## Infrastructure Philosophy
+**`order_items`** — drop `workspace_id` and `store_id` columns.
 
-### Phase 1: Plesk
-Start cheap and simple. A single Plesk server is adequate for hundreds of workspaces with daily sync jobs. Plesk handles SSL, nginx config, and domain management. Git-based deployment via Plesk's native panel keeps things simple.
+### New Tables
 
-**When to graduate to Phase 2:** When you hit ~500+ active workspaces, or when sync jobs regularly queue-overflow, or when you need guaranteed uptime during deployments.
-
-### Phase 2: Three Servers
+**`daily_snapshot_products`** — replaces daily_snapshots.top_products JSONB
+```sql
+id BIGSERIAL PK
+workspace_id BIGINT FK workspaces CASCADE
+store_id BIGINT FK stores CASCADE
+snapshot_date DATE NOT NULL
+product_external_id VARCHAR(255) NOT NULL
+product_name VARCHAR(500) NOT NULL
+revenue DECIMAL(14,4) NOT NULL
+units INT NOT NULL DEFAULT 0
+rank SMALLINT NOT NULL
+created_at TIMESTAMP
+UNIQUE(store_id, snapshot_date, product_external_id)
+INDEX(workspace_id, snapshot_date)
 ```
-Hetzner LB (€6/mo)
-├── App Server 1 — Laravel + Nginx + PHP-FPM + Horizon
-└── App Server 2 — Laravel + Nginx + PHP-FPM + Horizon
-         ↓
-    DB Server — PostgreSQL 18 + Redis 8 (8-16GB VPS, ~€35-50/mo)
+
+**`store_urls`** — pages to monitor via PSI + uptime
+```sql
+id BIGSERIAL PK
+workspace_id BIGINT FK workspaces CASCADE
+store_id BIGINT FK stores CASCADE
+url VARCHAR(2048) NOT NULL
+label VARCHAR(255) NULL
+is_homepage BOOLEAN DEFAULT false
+is_active BOOLEAN DEFAULT true
+created_at, updated_at TIMESTAMP
+UNIQUE(store_id, url)
+INDEX(workspace_id, store_id)
 ```
-**Total: ~€80-100/mo** including load balancer.
 
-PostgreSQL and Redis on the same server is fine at this scale. Redis is in-memory (~1-4GB), PostgreSQL uses disk + memory cache (~1-4GB). An 8-16GB VPS handles both comfortably.
+**`lighthouse_snapshots`** — PSI check results
+```sql
+id BIGSERIAL PK
+workspace_id BIGINT FK workspaces CASCADE
+store_id BIGINT FK stores CASCADE
+store_url_id BIGINT FK store_urls CASCADE
+checked_at TIMESTAMP NOT NULL
+strategy VARCHAR(10) DEFAULT 'mobile'
+performance_score SMALLINT NULL
+seo_score SMALLINT NULL
+accessibility_score SMALLINT NULL
+best_practices_score SMALLINT NULL
+lcp_ms INT NULL
+fcp_ms INT NULL
+cls_score DECIMAL(6,4) NULL
+inp_ms INT NULL
+ttfb_ms INT NULL
+tbt_ms INT NULL
+raw_response JSONB NULL
+raw_response_api_version VARCHAR(20) NULL
+created_at TIMESTAMP
+INDEX(store_url_id, checked_at)
+INDEX(workspace_id, checked_at)
+```
 
-**PostgreSQL HA options:**
-- **Recommended: Hetzner Managed Databases (~€35-50/mo).** They run PG for you — HA, automated backups, zero-downtime maintenance. Worth it to remove all DB ops burden.
-- **DIY: PG streaming replication + hot standby.** Only pursue if you have PostgreSQL ops experience.
+**`uptime_checks`** — HTTP liveness results, ingested via API from external probe scripts. **Partitioned by month** (PostgreSQL declarative partitioning) from day one. At 10-min intervals across many stores, this table grows steadily. Monthly partitioning keeps indexes small and makes retention cleanup a partition drop instead of a DELETE.
+```sql
+id BIGSERIAL PK
+workspace_id BIGINT FK workspaces CASCADE
+store_id BIGINT FK stores CASCADE
+store_url_id BIGINT FK store_urls CASCADE
+probe_id VARCHAR(50) NOT NULL   -- identifies which probe server reported (e.g. 'eu-1', 'us-1')
+checked_at TIMESTAMP NOT NULL
+is_up BOOLEAN NOT NULL
+status_code SMALLINT NULL
+response_time_ms INT NULL
+error_message VARCHAR(500) NULL
+created_at TIMESTAMP
+INDEX(store_url_id, checked_at)
+INDEX(workspace_id, is_up, checked_at)
+PRIMARY KEY (id, checked_at)  -- PostgreSQL requires partition key in PK
+) PARTITION BY RANGE (checked_at);
+```
+**Partition management:** CleanupPerformanceDataJob (Sunday 04:00 UTC) must include an explicit step: "ensure next 2 months of partitions exist, create if missing." This runs weekly, giving ample buffer before month rollover. Without this, the first day of a new month with no partition will hard-fail all inserts.
 
-**Deployer:** Zero-downtime deploys. Deploys to one server at a time, atomic symlink-based releases, health checks before switching traffic.
+**External probe architecture:**
+- Lightweight stateless scripts deployed on 2+ cheap VPS (e.g. Hetzner €4/mo each, different regions)
+- Probe fetches targets: `GET /api/uptime/targets` (returns active store_urls with auth token)
+- Probe reports results: `POST /api/uptime/report` (batch of check results with probe_id)
+- API endpoints authenticated via a per-probe API key (stored in probe_api_keys config, not user-facing)
+- Alert logic in Laravel: EvaluateUptimeJob (10-min schedule) reads uptime_checks. Alert fires after 2 consecutive check windows (~20 min) where ≥2 probes report down for the same URL. 20 min is already significant downtime — don't wait longer. Single-probe-down = log warning, don't alert (probe itself may have network issues). Auto-resolve on first up check from any probe.
 
-**Ansible:** Idempotent server provisioning. Write once, run on any fresh VPS. Living infrastructure documentation.
+**`uptime_daily_summaries`** — aggregated from uptime_checks before raw deletion
+```sql
+id BIGSERIAL PK
+store_url_id BIGINT FK store_urls CASCADE
+workspace_id BIGINT FK workspaces CASCADE
+date DATE NOT NULL
+checks_total INT NOT NULL
+checks_up INT NOT NULL
+uptime_pct DECIMAL(5,2) NOT NULL
+avg_response_ms INT NULL
+created_at TIMESTAMP
+UNIQUE(store_url_id, date)
+INDEX(workspace_id, date)
+```
 
-### Queue Failover
-1. Job stored in Redis (persisted to disk via AOF)
-2. Horizon picks up job, "reserves" it with visibility timeout
-3. If server dies, Horizon on surviving server sees reserved job as abandoned after timeout → re-queues
-4. Job runs again from scratch. Safe because all writes use `upsert()`.
+**`store_webhooks`** — replaces stores.platform_webhook_ids JSONB
+```sql
+id BIGSERIAL PK
+store_id BIGINT FK stores CASCADE
+workspace_id BIGINT FK workspaces CASCADE
+platform_webhook_id VARCHAR(255) NOT NULL
+topic VARCHAR(255) NOT NULL
+created_at TIMESTAMP
+deleted_at TIMESTAMP NULL
+UNIQUE(store_id, platform_webhook_id)
+```
 
-### Why sessions in Redis (not files)
-With two app servers, file sessions would be per-server. Server 1 creates a session, next request hits Server 2 — session not found. Redis is shared across servers. No sticky sessions needed.
+**`metric_baselines`** — precomputed rolling statistics for anomaly detection
+```sql
+id BIGSERIAL PK
+workspace_id BIGINT FK workspaces CASCADE
+store_id BIGINT FK stores NULL CASCADE  -- null = workspace-level metric
+metric VARCHAR(100) NOT NULL
+weekday SMALLINT NOT NULL               -- 0=Mon..6=Sun (ISO)
+median DECIMAL(14,4) NOT NULL
+mad DECIMAL(14,4) NOT NULL              -- median absolute deviation
+data_point_count INT NOT NULL           -- how many weeks contributed
+stability_score DECIMAL(5,4) NULL       -- MAD/median ratio (lower = more stable = higher confidence). NULL when median = 0 (legitimate for metrics with zero-value weekdays like Sunday sales). When NULL, fall back to data_point_count tier only for confidence scoring.
+updated_at TIMESTAMP
+-- Two partial unique indexes (PostgreSQL treats NULL as distinct in regular UNIQUE):
+-- CREATE UNIQUE INDEX metric_baselines_store_unique ON metric_baselines(workspace_id, store_id, metric, weekday) WHERE store_id IS NOT NULL;
+-- CREATE UNIQUE INDEX metric_baselines_workspace_unique ON metric_baselines(workspace_id, metric, weekday) WHERE store_id IS NULL;
+```
+
+**Confidence tiers based on data_point_count:**
+- < 3 weeks: no alerts at all (silent, regardless of is_silent flag)
+- 3-5 weeks: alerts only for extreme deviations (>4 MAD)
+- 6+ weeks: normal sensitivity (>2.5 MAD for warning, >3.5 MAD for critical)
+
+**Absolute-volume floors (prevents Poisson noise false positives on small stores):**
+- Revenue alerts: skip if store averages <€500/day over baseline period
+- Order count alerts: skip if store averages <15 orders/day
+- These apply in addition to confidence tiers — a store with 6 weeks of data but only 8 orders/day still skips order-count alerts
+- Thresholds in config, not hardcoded
+
+**Known limitation (log, don't fix yet):** weekday dimension captures weekly seasonality but misses day-of-month effects (payday spikes ~25th-1st). Fix in Phase 3 with STL decomposition or a second baseline dimension.
+
+**Edge case — stability_score when median = 0:** Many metrics legitimately have median = 0 on certain weekdays (no Sunday sales, campaign paused on weekends, new GSC page). When median = 0, set stability_score = NULL. Confidence scoring falls back to data_point_count tier only. Document in ComputeMetricBaselinesJob comments.
+
+**Metrics tracked:**
+- Per-store: `revenue`, `orders_count`, `aov`, `new_customers`, `items_sold`, `refunds_daily_amount`, `refunds_daily_count` (refund metrics aggregated from refunds table by refunded_at date, not stored in daily_snapshots. **Note:** ComputeMetricBaselinesJob needs a different query path for refund metrics — query refunds table grouped by date, not daily_snapshots. Add a code comment in the job stub.)
+- Per-workspace (store_id NULL): `total_revenue`, `total_orders`, `blended_roas`, `total_ad_spend`
+- Per-GSC-property: `gsc_clicks`, `gsc_impressions`, `gsc_avg_position`
+
+**`holidays`** — global reference table of public holidays by country
+```sql
+id BIGSERIAL PK
+country_code CHAR(2) NOT NULL    -- ISO 3166-1 alpha-2
+date DATE NOT NULL
+name VARCHAR(255) NOT NULL
+year SMALLINT NOT NULL
+created_at TIMESTAMP
+UNIQUE(country_code, date, name)
+INDEX(country_code, year)
+```
+
+**Population:** Use `azuyalabs/yasumi` PHP library. `RefreshHolidaysJob` runs January 1st, regenerates all countries that have at least one workspace. Also triggered on workspace creation if workspace.country has no holidays for current year. No per-workspace duplication — one row per country per holiday per year.
+
+**`workspace_events`** — workspace-specific promotions/context for baseline adjustment
+```sql
+id BIGSERIAL PK
+workspace_id BIGINT FK workspaces CASCADE
+event_type VARCHAR(50) NOT NULL  -- 'promotion', 'expected_spike', 'expected_drop'
+name VARCHAR(255) NOT NULL
+date_from DATE NOT NULL
+date_to DATE NOT NULL
+is_auto_detected BOOLEAN DEFAULT false  -- auto-detected from coupon usage
+needs_review BOOLEAN DEFAULT false      -- for auto-detected promotions
+suppress_anomalies BOOLEAN DEFAULT true
+created_at, updated_at TIMESTAMP
+INDEX(workspace_id, date_from, date_to)
+```
+
+**Integration:** DetectAnomaliesJob checks BOTH `holidays` (via workspace.country) AND `workspace_events` before firing. If today matches a holiday for the workspace's country OR falls within a workspace_event where suppress_anomalies = true, skip detection (or log as suppressed for silent mode review). ComputeMetricBaselinesJob excludes both holiday dates and workspace_event dates from the rolling window. Retroactive promotion marking immediately improves baselines on next recalculation.
+
+**`order_coupons`** — normalized coupon tracking
+```sql
+id BIGSERIAL PK
+order_id BIGINT FK orders CASCADE
+coupon_code VARCHAR(255) NOT NULL
+discount_amount DECIMAL(12,2) NOT NULL
+discount_type VARCHAR(50) NULL   -- 'percent', 'fixed_cart', 'fixed_product'
+created_at TIMESTAMP
+INDEX(order_id)
+INDEX(coupon_code, created_at)   -- for coupon usage aggregation
+```
+
+**`refunds`** — individual refund events
+```sql
+id BIGSERIAL PK
+order_id BIGINT FK orders CASCADE
+workspace_id BIGINT FK workspaces CASCADE
+platform_refund_id VARCHAR(255) NOT NULL  -- Woo refund ID, Shopify refund ID, etc.
+amount DECIMAL(12,2) NOT NULL
+reason TEXT NULL
+refunded_by_id VARCHAR(255) NULL
+refunded_at TIMESTAMP NOT NULL
+raw_meta JSONB NULL
+raw_meta_api_version VARCHAR(20) NULL
+created_at TIMESTAMP
+UNIQUE(order_id, platform_refund_id)
+INDEX(workspace_id, refunded_at)
+```
+
+Also keep denormalized `refund_amount` and `last_refunded_at` on orders — updated at sync time.
+
+**`product_categories`** — category hierarchy
+```sql
+id BIGSERIAL PK
+workspace_id BIGINT FK workspaces CASCADE
+store_id BIGINT FK stores CASCADE
+external_id VARCHAR(255) NOT NULL
+name VARCHAR(500) NOT NULL
+slug VARCHAR(500) NULL
+parent_external_id VARCHAR(255) NULL
+created_at, updated_at TIMESTAMP
+UNIQUE(store_id, external_id)
+```
+
+**`product_category_product`** — many-to-many pivot
+```sql
+product_id BIGINT FK products CASCADE
+category_id BIGINT FK product_categories CASCADE
+UNIQUE(product_id, category_id)
+```
+
+**`google_ads_keywords`** — for keyword cannibalization detection
+```sql
+id BIGSERIAL PK
+workspace_id BIGINT FK workspaces CASCADE
+ad_account_id BIGINT FK ad_accounts CASCADE
+ad_group_id VARCHAR(255)
+keyword_text VARCHAR(500)
+match_type VARCHAR(50)   -- BROAD, PHRASE, EXACT
+status VARCHAR(100)
+created_at, updated_at TIMESTAMP
+UNIQUE(ad_account_id, ad_group_id, keyword_text, match_type)
+INDEX(workspace_id)
+```
+
+**`notification_preferences`** — per-workspace-per-user alert configuration
+```sql
+id BIGSERIAL PK
+workspace_id BIGINT FK workspaces CASCADE
+user_id BIGINT FK users CASCADE
+channel VARCHAR(20) NOT NULL      -- 'email', 'in_app'
+severity VARCHAR(20) NOT NULL     -- 'critical', 'high', 'medium', 'low'
+enabled BOOLEAN DEFAULT true
+delivery_mode VARCHAR(20) DEFAULT 'immediate'  -- 'immediate', 'daily_digest', 'weekly_digest'
+quiet_hours_start TIME NULL
+quiet_hours_end TIME NULL
+UNIQUE(workspace_id, user_id, channel, severity)
+```
+
+**Sensible defaults (95% of users never change):**
+- Critical: email immediate + in-app immediate
+- High: email daily digest + in-app immediate
+- Medium: in-app only, email in daily digest
+- Low: in-app only
+- Quiet hours default: 22:00-08:00 in workspace timezone. Critical alerts override quiet hours.
+
+**`coupon_exclusions`** — coupons excluded from auto-promotion detection
+```sql
+id BIGSERIAL PK
+workspace_id BIGINT FK workspaces CASCADE
+coupon_code VARCHAR(255) NOT NULL
+reason VARCHAR(255) NULL
+created_at TIMESTAMP
+UNIQUE(workspace_id, coupon_code)
+```
 
 ---
 
-## Multi-Tenancy Design
+## Data Capture Strategy
 
-### Why workspace-level (not user-level)
-Store owners typically have one workspace but may want to share access with team members (a marketing manager, a VA). Workspace-level tenancy lets multiple users access the same data with role-based permissions. User-level tenancy would require complex sharing.
+**Principle:** If the data is in the API response, cheap to store, and impossible/expensive to backfill — capture it now. Schema changes on a live database are painful.
 
-### Why WorkspaceScope (not manual WHERE clauses)
-Every developer who forgets a `WHERE workspace_id = ?` creates a cross-tenant data leak. A global scope enforced at the Eloquent model level makes it structurally impossible to forget. The only escape hatch is explicit `withoutGlobalScope()` which is immediately visible in code review.
+**Two patterns:**
+1. **Promote to real columns** — fields we'll query in Phase 0-2 (correlation engine, pricing, common queries)
+2. **JSONB with API version** — fields for Phase 3+ ("might need later"). Every JSONB column gets a paired `*_api_version VARCHAR(20)` column in the same migration.
 
-### Why throw instead of silent no-op when context not set
-See FX rates section above — same principle. A silent `if ($id) { query }` would return ALL data when context isn't set. A crash is better than a data leak.
+### What to promote (real columns, listed above in schema changes):
+- GSC: device, country
+- Orders: payment_method, payment_method_title, shipping_country, refund_amount, customer_id, utm_term
+- Products: stock_status, stock_quantity, product_type
+- Campaigns: daily_budget, lifetime_budget, budget_type, bid_strategy, target_value
+- Ad insights: frequency, platform_conversions, platform_conversions_value, search_impression_share
+- Ads: effective_status
 
-### Why SoftDeletes trait on Workspace
-The `deleted_at` column supports 30-day recovery. Using Laravel's `SoftDeletes` trait ensures all Eloquent queries automatically exclude soft-deleted workspaces — no risk of forgetting a manual `whereNull('deleted_at')` check. `PurgeDeletedWorkspaceJob` uses `onlyTrashed()` to find candidates for hard-delete.
+### What to JSONB:
+- `ads.creative_data` — images, headlines, descriptions, video thumbnails, call-to-action
+- `ad_insights.raw_insights` — Facebook actions array, social_spend, placement breakdowns
+- `orders.raw_meta` — fee_lines, order_notes (TEXT not JSONB for notes)
+- `refunds.raw_meta` — full refund response
 
----
-
-## Billing Design Decisions
-
-### Why billing_plan on workspaces (not via Cashier's stripe_status)
-Cashier tracks subscription state in `subscriptions.stripe_status` (active, trialing, past_due, etc.). But we need our own `billing_plan` column for:
-1. Distinguishing between starter/growth/scale/percentage/enterprise (Stripe doesn't know these labels)
-2. Fast queries without joining subscriptions table
-3. Enterprise plan management (custom contracts set manually, not via Stripe)
-
-### Why grace period instead of immediate lock
-Immediate lock on plan limit exceedance would:
-- Lock a Black Friday spike that resolves next month (customer churns)
-- Create anxiety for customers near the limit
-
-7-day grace period gives customers time to upgrade without panic. The grace period is only set if null (prevents nightly job from infinitely extending it). If revenue drops back below limit, grace period is cleared automatically.
-
-### Why report revenue to Stripe in EUR always
-Stripe's metered billing can only have one currency per price. We chose EUR as it's the most natural for EU-focused SaaS. If a workspace uses GBP reporting currency, we convert their GBP-denominated revenue to EUR using the last-day-of-previous-month FX rate before reporting to Stripe. This ensures all workspaces are billed consistently regardless of their reporting currency.
-
-### Why the €149 floor on percentage tier
-Metered billing doesn't support native minimums. The floor protects against a workspace with high store revenue but a bad month (say, returns spike) paying €50 while consuming significant sync resources.
-
-### Why enterprise threshold is sales-driven (no automation)
-The €250k/mo threshold is a trigger for a sales conversation, not an automated plan change. Enterprise contracts involve custom terms, SLAs, and pricing — automating this would create bad experiences (e.g., locking a workspace mid-month because revenue crossed a line). `CheckWorkspacePlanLimitsJob` only processes flat tiers.
-
-### Why no custom handling for past_due subscriptions
-Stripe handles payment retries automatically with configurable retry schedules. Cashier updates `stripe_status` on the subscription. The subscription remains technically active during retries — the user keeps access. If Stripe exhausts retries, it fires `customer.subscription.deleted`, which nulls `billing_plan` and triggers the standard billing redirect. Adding custom `past_due` logic would duplicate Stripe's built-in dunning.
-
-### Why sync billing_plan via Cashier WebhookReceived events
-Cashier handles the raw Stripe webhook verification and subscription model updates. We listen to Cashier's `WebhookReceived` event (not raw Stripe webhooks) to sync our custom `billing_plan` column: `customer.subscription.created` → set plan from price ID, `customer.subscription.updated` → update plan, `customer.subscription.deleted` → null plan. This avoids reimplementing webhook verification and keeps billing_plan in sync with Stripe state.
+**Critical rule:** Store API version alongside every JSONB blob. Without this, API response shape changes silently create structural variation in your JSONB that's invisible until extraction fails months later.
 
 ---
 
-## Integration Decisions
+## Billing Model
 
-### WooCommerce: Why API key auth (not OAuth)
-WooCommerce's OAuth implementation is non-standard and poorly supported in older versions. API keys (consumer key + secret) are universally supported, simpler for users to create, and don't expire. Since our target users are non-technical store owners, simplicity matters.
+### Pricing philosophy: unified "managed value"
+One mental model: **you pay based on how much money flows through the tool.** Ecommerce = GMV. Non-ecommerce = ad spend. Different tier boundaries because ad spend is always a fraction of revenue.
 
-### Facebook: Why long-lived token immediately (not storing short-lived)
-Short-lived tokens (~2 hours) are essentially useless for background sync jobs. The long-lived token (~60 days) needs to be obtained immediately after OAuth because the short-lived token is only valid for the exchange window. If we stored the short-lived token and tried to exchange it later, it would have expired.
+### Tier structure
 
-### Facebook: Why no silent refresh (unlike Google)
-Facebook's long-lived tokens don't have refresh tokens. When they expire (~60 days), the user must re-authenticate. This is a Facebook platform limitation. We alert owners 7 days before expiry to give them time to reconnect.
+| Tier | GMV limit | Ad spend limit | Monthly | Annual |
+|---|---|---|---|---|
+| **Starter** | ≤€5k/mo | ≤€5k/mo | €29 | €290/yr |
+| **Growth** | ≤€25k/mo | ≤€25k/mo | €59 | €590/yr |
+| **Scale** | >€25k/mo | >€25k/mo | 1% GMV / 2% ad spend (min €149) | N/A |
+| **Enterprise** | >€250k GMV/mo | >€100k spend/mo | Custom | Custom |
 
-### Google Ads: Why apply for Standard Access early
-Basic Access only allows querying test accounts. Without Standard Access (requires live app review), you cannot query real customer data. Review takes 2-3 business days. Build with a test account, but submit the review application from day one of development.
+**All tiers get full features.** No feature gating between Starter/Growth/Scale — the only difference is the billable volume. Correlation engine, anomaly alerts, AI summaries, PDF reports, multi-store — all included from Starter. This avoids "why am I paying more for the same features" friction and keeps the value prop clean: you pay for scale, not features.
 
-### Facebook: Why Advanced Access early
-Facebook's Advanced Access (required for `ads_read` on non-test accounts) takes 2-6 weeks and requires a live demo URL, screencast, privacy policy, and business verification. This is the longest lead-time dependency in the entire project. Submit as soon as you have a working demo.
+**Billing basis auto-derivation:**
+- `has_store = true` → bill on GMV (SUM of daily_snapshots.revenue for previous month)
+- `has_store = false` → bill on ad spend (SUM of ad_insights.spend_in_reporting_currency for previous month)
+- Both store AND ads → GMV only (ad spend drives GMV, don't double-count)
+- Billing basis switch (non-ecom → ecom on store connect): billing calculation method changes at next monthly cycle. No mid-month pro-ration.
+- Document this explicitly in billing code.
 
-### Google Ads: Why GAQL (not REST)
-Google's legacy AdWords API (SOAP-based) is deprecated. The Google Ads API uses GAQL (Google Ads Query Language), a SQL-like syntax. It's the current standard and the only supported API for new integrations.
+**14-day free trial:**
+- `trial_ends_at` set at workspace creation. Full access, no payment method required.
+- Trial expires without payment method: **freeze all sync jobs**. Freeze means: scheduler skips the workspace entirely (check `trial_ends_at < now() AND subscription_status != 'active'` in each dispatch filter). Jobs already in the queue when trial expires are discarded on pickup via a middleware check in the job's handle() method. Dashboard stays visible with stale data + prominent upgrade banner. Do NOT keep jobs running at your cost.
+- 30 days expired: suspend workspace (archive, don't delete).
+- 90 days expired: delete data per GDPR.
+- **Reactivation after freeze:** On payment, trigger catch-up sync for the gap period (same mechanism as initial historical import). This prevents data holes that confuse users and break baselines.
 
-### GSC: Why store tokens in session during connection
-The OAuth flow returns tokens before the user has selected which property to connect. We can't create the `search_console_properties` row yet (don't know which `siteUrl` to save). Temporary session storage bridges the gap. If session expires between step 4 and step 7, user just reconnects — no harm done.
+**Consolidated agency billing:** Deferred to Phase 3+. Revisit when agencies request it. Concept: `workspaces.billing_workspace_id` → child workspaces share billing owner's subscription. Tier determined by group total.
 
-### Why no ad account–store FK link
-Matching ad accounts to stores is a fundamentally difficult problem. A Facebook ad account might run ads for multiple stores. A store might have multiple ad accounts. The safe default: ROAS is blended at workspace level. Users who need per-store ROAS can filter by looking at ad account spend separately and comparing to store revenue. This is a documented limitation, not a bug.
+**Free tier consideration (deferred):** WooCommerce plugin directory rewards products with a free tier for conversion. Worth evaluating post-launch whether a limited free tier (1 store, 1 integration, reports only) would meaningfully accelerate plugin-directory installs or just create support load. Not a Phase 1 decision.
 
----
+**No white-labeling** at MVP. Full Nexstage branding everywhere. Decision documented: revisit at €20k MRR or 100 active workspaces. When ready: ~2-3 weeks work (custom logo/colors is easy, custom domain needs SSL provisioning).
 
-## Data Architecture Decisions
-
-### Why pre-aggregated snapshots (not query-time aggregation)
-A workspace with 3 years of order history might have 100,000+ orders. Summing them on every dashboard request would be slow (500ms+) and increase DB load linearly with workspace size. By computing `daily_snapshots` nightly, dashboard queries are simple `WHERE date BETWEEN ? AND ?` aggregations on a small, well-indexed table.
-
-### Why not store account-level or adset-level ad insights
-We only show campaign-level and ad-level breakdowns in the UI. Storing account and adset rows would double the `ad_insights` table size with data we never query. The level column + partial unique indexes enforce this at the DB level.
-
-### Why partial indexes on ad_insights (not composite UNIQUE)
-`campaign_id` is nullable (for ad-level rows it's meaningless), and `ad_id` is nullable (for campaign-level rows). PostgreSQL's `UNIQUE` constraint treats NULLs as distinct, so `UNIQUE(campaign_id, date)` would allow duplicate rows where campaign_id is NULL. Partial indexes filter to the specific level, solving this cleanly.
-
-### Why JSONB for top_products and revenue_by_country
-These are pre-computed aggregates that are read as a unit (display top 10 products) or iterated (render country map). Storing them in JSONB is simpler and faster than a separate `daily_snapshot_products` table with a FK join. The data doesn't need to be queryable at the element level.
-
-### Why track new_customers/returning_customers at snapshot time
-Computing new vs returning at query time would require: for each order in the date range, check if that `customer_email_hash` has appeared before. That's an expensive correlated subquery across potentially thousands of orders. Computing it nightly in `ComputeDailySnapshotJob` means the answer is always a precomputed integer.
-
+### Billing mechanics (preserve from current implementation)
+- **No plan selection** — auto-assigned based on last full calendar month billable amount
+- Annual: 2 months free (Starter/Growth only). Upgrade mid-year, never downgrade mid-year.
+- Scale tier: Stripe metered billing. Floor: `max($calculated, 149.00)`. Auto-enter when billable amount >€25k, auto-exit to Growth if drops below.
+- Scale rate: 1% of GMV for ecom, 2% of ad spend for non-ecom.
+- Always report revenue in EUR to Stripe. Convert via fx_rates (last day of previous month).
+- WebhookReceived events sync billing_plan.
 
 ---
 
-## Error Handling Philosophy
+## Onboarding Flow
 
-### Fail Loud, Never Fake
+**Updated flow:**
+1. Register → verify email
+2. **Single screen with three connection tiles:** Store, Ad Accounts, GSC. Text: "Connect what you have — you can add more later." No forced ordering, no "what type of business" question.
+3. If store connected → import date selection → import progress → dashboard
+4. If only ads/GSC connected → straight to dashboard
+5. Invited users skip onboarding entirely.
 
-This codebase handles real money and real store data. A bug that silently produces wrong numbers is worse than one that crashes visibly.
+**Country auto-detection** (for holiday context):
+1. If store connected and domain has a country-code TLD (.de → DE, .fr → FR, .nl → NL) → use that. Only fires on actual ccTLDs, not .com/.shop/.io/.store.
+2. Fallback: IP geolocation on first login (covers .com stores and non-ecom users)
+3. Fallback: Stripe billing address country when payment added
+4. Always override-able in workspace settings
+5. Do NOT add an onboarding step for country.
 
-**Priority order for every operation:**
-1. Works correctly with real data ✓
-2. Falls back visibly — signals degraded mode with a banner or warning ✓
-3. Fails with a clear exception ✓
-4. Silently degrades to look "fine" with wrong/missing/stale data — **never** ✗
+---
 
-**Practical examples:**
+## Navigation Redesign
+
+```
+Overview                    → /dashboard       (cross-channel command center)
+
+--- Channels ---
+Paid Ads                    → /campaigns       (ad campaign performance)
+Organic Search              → /seo             (GSC + organic revenue context)
+Site Performance            → /performance     (Lighthouse, CWV, uptime)  [NEW]
+
+--- Analytics ---
+Daily Breakdown             → /analytics/daily
+By Product                  → /analytics/products
+By Country                  → /countries
+
+--- Stores ---
+All Stores                  → /stores
+[individual store]          → /stores/{slug}/overview
+
+Insights                    → /insights        (alert feed + AI summaries)
+
+--- Settings ---
+(existing: profile, workspace, team, integrations, billing)
+```
+
+Sidebar sections conditionally rendered based on workspace integration flags (has_store, has_ads, has_gsc, has_psi) from Inertia shared props.
+
+**Note:** Sidebar label "Paid Ads" links to /campaigns route. Update CampaignsController page title and breadcrumbs to match "Paid Ads" label, or rename the route to /paid-ads. Avoid mismatch between sidebar text and URL bar.
+
+---
+
+## Dashboard — Cross-Channel Command Center
+
+### Priority-tier layout (not a flat 16-card grid)
+
+**Hero row (3 cards max):** Revenue (or ROAS if more actionable), Orders, and a composite "attention needed" indicator showing the highest-priority alert from the correlation engine. If no alert, shows neutral status.
+
+**Channel rows below:** Collapsible sections for Store / Paid / Organic / Site Health, each with 3-4 metric cards.
+- Default expanded: sections with active alerts auto-expand, quiet sections collapse to one-line summary
+- Absent sections: collapse entirely (don't show empty slots). Sidebar prompt with specific value prop: "Connect Meta Ads to see cross-channel ROAS and detect campaign budget issues."
+
+**Store metrics row** (when store connected): Revenue, Orders, AOV, New Customers
+**Paid row**: Ad Spend, Blended ROAS, Attributed Revenue, CPO
+**Organic row** (when GSC connected): GSC Clicks, GSC Impressions, Avg Position, Unattributed Revenue
+**Site health row** (when PSI data exists): Performance Score, LCP, CLS, Uptime
+
+**Chart:** MultiSeriesLineChart with toggleable series: Revenue, Ad Spend, ROAS, GSC Clicks on same timeline.
+- GSC on hourly granularity: `connectNulls={false}` (gap, not zero dip). Footnote: "GSC data is daily only. Hourly view shows no organic data."
+- Multiple GSC properties: sum clicks/impressions across all. Footnote: "Aggregated across N properties."
+
+**Event overlays on all time-series charts:** Vertical line markers for holidays (from holidays table by workspace.country), workspace_events (promotions), and daily_notes. Different colors per type: holiday (gray), promotion (blue), daily note (green). Same component across Dashboard, Campaigns, SEO, Performance pages.
+
+**AI Summary:** Daily cross-channel narrative.
+
+**Daily Notes:** Prominent input (not hidden in tooltip). Recent notes rendered as visible annotations on main chart timeline. Notes persist in Insights feed alongside AI summaries.
+
+---
+
+## Unattributed Revenue
+
+Tooltip: "Revenue not linked to a tracked ad campaign. Includes organic search, direct, email campaigns (Klaviyo, Mailchimp), affiliates, and any other untagged traffic. To separate email revenue, ensure your email campaigns use UTM parameters with utm_medium=email."
+
+Show on: SEO page, Campaigns page, Dashboard (organic row).
+
+---
+
+## Platform ROAS vs Real ROAS
+
+Tooltip on Campaigns page: "Platform ROAS is what Meta/Google report using pixel-based attribution. Real ROAS is calculated from your actual orders with UTM parameters matching this campaign. The gap indicates attribution overlap — Meta and Google both claim credit for the same orders."
+
+---
+
+## Cross-Channel Page Enhancements
+
+### SEO page
+- Add "Total Store Revenue" and "Unattributed Revenue" metric cards
+- Unattributed = `max(0, total - UTM-attributed)` via RevenueAttributionService
+- CTR Opportunities section (Phase 2): keywords position 1-10, impressions >100, CTR below position benchmark
+- Keyword cannibalization section (Phase 3): keywords in both GSC top 10 AND Google Ads
+
+### Campaigns page
+- Add "Total Store Revenue" and "Unattributed Revenue" cards above campaign table
+- Spend velocity column: `(spent_to_date / budget_amount) / (days_elapsed / days_in_period)`. Requires budget fields on campaigns.
+- Platform ROAS vs Real ROAS explanation tooltips
+
+### Products page
+- Period-over-period trending (TrendBadge component, green/red pill with delta %)
+- Edge case: if compare_from falls before earliest_date, return null for deltas (no badge, not zero)
+- Stock status indicator per row (Out of stock / Low stock badge)
+- Query daily_snapshot_products (normalized table)
+
+---
+
+## Performance Monitoring
+
+### PSI Rate Limit Planning
+- Default: mobile only. Desktop is optional per-URL toggle.
+- Stagger across 4-hour window: `store_url_id % 240` minutes offset
+- Quota exceeded: skip gracefully, log warning, retry next day
+
+### URL management
+- On store connection: auto-create store_urls row for homepage
+- Store settings: add up to 9 additional URLs (10 total)
+- If GSC connected: suggest top 5 GSC pages by clicks when adding URLs
+
+### Performance page (/performance)
+- URL selector / store selector
+- Score cards: Performance, Accessibility, SEO, Best Practices (color-coded)
+- CWV cards: LCP, CLS, INP with threshold badges
+- Score trend chart with annotations on significant changes (>5 points)
+- Event overlays (holidays, daily_notes, workspace_events) on the score timeline
+- Uptime panel: last 24h / 7d / 30d uptime % (renders when uptime data exists — Phase 2+)
+- Table: all monitored URLs with latest scores + change indicator
+- Revenue impact estimate on regression cards (labeled "estimated", shown as range)
+
+---
+
+## Anomaly Detection System
+
+### DetectAnomaliesJob
+Dispatched after ComputeMetricBaselinesJob completes for each workspace.
+
+**Detection method:** Median + MAD (Median Absolute Deviation). MAD is robust against Black Friday/sale outliers poisoning the baseline, unlike stddev.
+
+**Skip conditions:**
+1. No workspace member has `last_login_at` within 7 days
+2. No integration in `status = 'active'`
+3. Data insufficient (< 3 weeks of baselines)
+4. Today matches a holiday (via workspace.country in holidays table) OR falls within a workspace_event with `suppress_anomalies = true`
+
+### Individual signal detection
+
+**Revenue anomaly:** Compare today's revenue to weekday-adjusted median from metric_baselines. Alert if deviation > threshold (based on confidence tier). Stock-awareness guard: before firing, check if affected top products are out_of_stock. Concrete rule: if products accounting for ≥50% of normal daily revenue (based on daily_snapshot_products rolling average) are currently out_of_stock, suppress the revenue-drop alert entirely. If ≥25% but <50%, downgrade severity by one level (critical→high, high→medium). Below 25%, fire normally. These thresholds go in a config, not hardcoded.
+
+**ROAS anomaly:** Same weekday baseline. Warning if ROAS drops >25%.
+
+**Ad spend anomaly:** Any drop >80% or to zero = high priority (likely billing/pause/budget cap). Cross-reference with campaign.daily_budget.
+
+**GSC clicks anomaly:** Compare to 7-day rolling average per property. Alert if total clicks drop >40%.
+
+**GSC position drop:** Keywords where position worsened by >3 spots AND keyword was in top 20 last week. Batch multiple keywords into one alert.
+
+**Performance score drop:** Alert if performance_score drops >10 points, or any CWV crosses grade boundary (LCP: 2.5s/4s, CLS: 0.1/0.25, INP: 200ms/500ms).
+
+**Uptime alert:** Requires 2 consecutive down checks from ≥2 probes (~20 min at 10-min intervals) before firing critical. 20 min is already significant — don't wait longer. Auto-resolve when uptime restores (any single up check from any probe).
+
+**Payment gateway anomaly (Phase 2):** Payment method X averaged Y orders/day for 30 days, had Z orders today where Z < 0.3 × Y → alert.
+
+**Refund anomaly:** High refund day (refunds_daily_amount deviates from baseline). Distinguish from "low order day" — different causes, different fixes. Note: refund baselines need 6+ weeks of history before firing at normal sensitivity. The same confidence tier logic (data_point_count < 3 → no alerts) applies to refund metrics identically to revenue metrics.
+
+### Composite signal correlation — correlateSignals()
+
+After individual signals are collected, run an ordered investigation chain (not flat pattern matching):
+
+1. **Spend check** — did Meta/Google daily spend drop >X% or hit zero? Check against campaign budgets.
+2. **Attribution check** — did attributed revenue drop proportionally to unattributed? (Proportional = real demand drop. Disproportional = tracking break)
+3. **Platform conversion check** — did platform-reported conversions drop while actual orders held steady? (CAPI/tag break)
+4. **Organic check** — did GSC impressions or clicks drop on top-20 revenue pages?
+5. **Position check** — did GSC average position degrade >3 on top revenue queries?
+6. **Site health check** — Lighthouse score drop >10, LCP regression >500ms, INP regression, uptime incidents
+7. **SSL/DNS check** — cert expiring, robots.txt changes
+8. **Stock check** — are top revenue products out of stock?
+9. **Payment check** — did a specific payment gateway stop processing?
+10. **Refund check** — is this a high-refund day, not a low-order day?
+
+Each check has a weight for ranking plausible causes:
+- Ad spend drop correlating with revenue: weight 10
+- Attribution break (platform ≠ actual): weight 9
+- Uptime incident: weight 9
+- SSL/DNS issue: weight 8
+- GSC clicks drop on revenue pages: weight 7
+- Site health regression same day as revenue drop: weight 7
+- GSC position drop: weight 5
+
+### Compositing rules
+- Single signal + high priority → alert
+- Two signals, temporally correlated (within 24h) → alert with ranked causes
+- Three+ signals → alert with full narrative
+- Stock-out on affected SKUs → suppress revenue-drop for that product
+
+### Starting thresholds (tune in silent mode)
+- Revenue: -25% vs baseline = investigate, -40% = high priority
+- Orders: -30% = investigate
+- ROAS per platform: -35% day-over-day = investigate
+- Ad spend: >80% drop or to zero = high priority
+- GSC clicks on top-20 revenue pages: -30% week-over-week = investigate
+- GSC position: drop of 3+ on top-10 revenue query = investigate
+- LCP: regression >500ms = investigate, >1000ms = high priority
+- Lighthouse performance score: drop >10 = investigate
+- SSL: <14 days to expiry = high priority, <7 = critical
+
+### Narrative output format (prose for MVP, tree visualization Phase 3+)
+```
+Revenue dropped 40% today (€1,240 vs expected €2,080)
+
+Most likely causes, in order of confidence:
+
+1. [HIGH] Your main Meta campaign "Summer Sale V3" hit its daily
+   budget cap at 09:14 — 4 hours earlier than usual.
+   Attributed Meta revenue down 60% (€680 lost).
+
+2. [MEDIUM] LCP on /shop regressed from 2.1s to 4.6s after
+   yesterday's deploy. GSC clicks on that page down 25%.
+   Estimated impact: €200–€470/day.
+
+These appear independent and compounding.
+
+[View details] [Dismiss] [This was expected]
+```
+
+The composite alert `data` field carries contributing signals and named pattern for structured frontend rendering.
+
+### Revenue impact estimation
+```
+estimated_daily_impact = (baseline_gsc_clicks - current_gsc_clicks)
+                       × gsc_conversion_rate_30d
+                       × store_aov_30d
+```
+
+Where gsc_conversion_rate_30d = `SUM(orders_count) / SUM(gsc_clicks)` — GSC-specific, not blended. Avoids double-counting users who click both ad and organic result. For multi-property workspaces: compute per GSC property when the alert is property-specific, fall back to workspace-level blend only when no property attribution is possible.
+
+Display as range: ±40% bounds. Calibrate to ±25% if silent mode data supports tighter bounds.
+
+**Surfaces:** Correlation narratives (always), Performance page regression cards, alert detail in Insights feed. **Never** on dashboard hero metric cards.
+
+Store audit trail on alert: `gsc_conversion_rate_at_alert`, `store_aov_at_alert` as separate columns.
+
+### Alert deduplication
+Before creating any alert (rule-based or AI), check for existing unresolved alert with same type + workspace_id (+ optional store_id) created within last 3 days. If one exists, skip. For uptime: auto-resolve when is_up returns true.
+
+### Silent mode
+- Ship anomaly engine with `is_silent = true` as default
+- Silent alerts don't trigger CriticalAlertMail, don't appear in Insights feed, don't show on dashboard
+- Admin panel: "Silent Alerts Review" page with one-click labeling (true_positive / false_positive / correct_but_uninteresting)
+- Review UI shows similar past alerts side-by-side when labeling
+- After 4 weeks: review true_positive rate. Target ≥70%.
+- **SILENT_MODE_GRADUATION.md** with go/no-go criteria: ≥70% TP rate, holiday/promotion context layer live, baseline confidence scoring working
+- Flipping is_silent default to false is a conscious product decision, not a code change
+
+### Coupon auto-promotion detection
+Track coupon usage baseline (MAD on daily usage per coupon). A coupon is "newly spiking" if:
+- <3 days of history AND used on ≥20% of today's orders, OR
+- Inactive for 14+ days AND now ≥10 orders/day
+- Minimum floor: ≥5 uses in a day
+- **Small store guard:** require store has ≥20 orders/day average over last 14 days. Below that, skip auto-detection entirely — these stores should mark promotions manually. Without this, stores with 8 orders/day will false-positive on random coincidences.
+
+Auto-create workspace_event with `is_auto_detected = true`, `needs_review = true`. User can confirm (becomes normal event) or dismiss (coupon added to coupon_exclusions so it doesn't flag again).
+
+Stacked coupons: count each coupon's usage on each order it appears on (not exclusively).
+
+---
+
+## Alert Notification Strategy
+
+**Three-tier delivery:**
+- Low (single signal, below critical): in-app only
+- Medium (multiple correlated, or single high-severity): in-app + daily email digest
+- High (site down, cart broken, gateway dead, severe composite with large revenue impact): in-app + real-time email
+
+**Rules:**
+- Never more than one high-priority real-time email per 4 hours per workspace
+- Quiet hours (default 22:00-08:00 workspace timezone) queue alerts for next active window. Critical overrides quiet hours.
+- Users configure per workspace in notification_preferences table.
+- Critical alert emails: one per alert, guard against duplicate same type + workspace within 24 hours. CriticalAlertMail template.
+- Future: Slack/Discord/Telegram webhooks (Phase 2+).
+
+---
+
+## Webhook Reliability
+
+### 90-minute fallback poll (existing, keep)
+If no webhook activity in last 90 minutes, poll WooCommerce API.
+
+### Daily reconciliation job (new)
+`ReconcileStoreOrdersJob` — runs nightly per store:
+- Query Woo REST API for orders in last 7 days
+- Compare order IDs against local orders table
+- Backfill missing, update changed (compare updated_at), log discrepancies
+- Alert internally if discrepancies >5% OR store has had webhook issues >48 hours
+
+### Webhook health surfacing (user-facing)
+On Integrations settings page per store:
+- Last successful sync time
+- Sync method: "Real-time (webhooks active)" / "Periodic (every 90 minutes)"
+- Data freshness: green (<2h) / amber (2-24h) / red (>24h)
+- Manual "Resync now" button
+- Amber/red warnings with troubleshooting links
+- Only flag discrepancies as failures, not quiet periods from low-volume stores
+
+### Product webhooks
+Register `product.updated` alongside `order.*` in ConnectStoreAction. Handle in WooCommerceWebhookController. Captures price changes, status changes, stock changes, category changes in near-real-time.
+
+---
+
+## StoreConnector Interface
+
+Formalize in Phase 0 so Shopify (Phase 3) is just a new implementation class:
 
 ```php
-// ❌ Wrong — corrupts financial data silently
-try {
-    $rate = FxRateService::getRate($currency, $reportingCurrency, $date);
-} catch (\Exception $e) {
-    $rate = 1.0; // "works" but gives completely wrong numbers
-}
-
-// ✅ Right — fails loudly, caller handles NULL explicitly
-try {
-    $rate = FxRateService::getRate($currency, $reportingCurrency, $date);
-} catch (FxRateNotFoundException $e) {
-    Log::warning('FX rate unavailable', ['currency' => $currency, 'date' => $date]);
-    return null; // total_in_reporting_currency stays NULL, excluded from totals
+interface StoreConnector {
+    public function testConnection(): bool;
+    public function syncOrders(Carbon $since): int;
+    public function syncProducts(): int;
+    public function syncRefunds(Carbon $since): int;
+    public function registerWebhooks(): array;
+    public function removeWebhooks(): void;
+    public function getStoreInfo(): array;
 }
 ```
 
-```php
-// ❌ Wrong — WorkspaceScope silently returns all data
-public function apply(Builder $builder, Model $model): void {
-    $id = app(WorkspaceContext::class)->id();
-    if ($id) { $builder->where('workspace_id', $id); }
-    // If $id is null (forgot to set in job), returns ALL workspace data — cross-tenant leak
-}
+Current WooCommerceClient already does most of this. Extract the interface, adapt the client to implement it.
 
-// ✅ Right — throws immediately, caught in testing
-public function apply(Builder $builder, Model $model): void {
-    $id = app(WorkspaceContext::class)->id();
-    if (!$id) { throw new \RuntimeException('WorkspaceContext not set'); }
-    $builder->where('workspace_id', $id);
-}
-```
-
-**Why "show an error state" not "show blank":**
-A blank card could mean "no data" or "something broke." They look the same to the user. An error state with a retry button communicates what happened and gives the user agency.
+**Product identity across platforms:** Same product on Woo + Shopify = separate by default. Manual "link products" action. Never auto-merge by SKU — SKUs lie.
 
 ---
 
-## Security Model
+## Job Dispatch Chain
 
-### Why SHA-256 hashing for customer emails
-GDPR makes us a data processor for customer PII. We don't need raw customer emails to answer "has this customer ordered before?" — we only need to compare. SHA-256 of the normalized email serves this purpose without storing the email itself. The hash is deterministic: `user@example.com` always produces the same hash. The normalization step (`lowercase`, `trim`) ensures `USER@EXAMPLE.COM` and `user@example.com` produce the same hash.
+```
+Schedule (daily):
+  DispatchDailySnapshots
+    → ComputeDailySnapshotJob (per store)
+      → ComputeMetricBaselinesJob (per workspace, after ALL store snapshots complete)
+        → DetectAnomaliesJob (per workspace, after baselines updated)
+          → correlateSignals() (inline, within DetectAnomaliesJob)
 
-### Why payload jsonb in webhook_logs
-We store the raw webhook payload for debugging: if an order has wrong data, we can replay the webhook. This may contain customer PII (billing name, email, address in the WooCommerce payload). Justified under GDPR's legitimate interest (debugging) with a 30-day purge. The data is never exposed in the UI.
+  GenerateAiSummaryJob (per workspace, 01:00-02:00 UTC staggered by workspace_id % 60)
+  RunLighthouseCheckJob (per URL, staggered across 4-hour window by store_url_id % 240)
+  UpdateFxRatesJob (06:00 UTC)
+  ReconcileStoreOrdersJob (per store, nightly)
+  SyncRecentRefundsJob (per store, nightly, last 7 days)
 
-### Why token-based webhook verification (not IP allowlisting)
-WooCommerce doesn't have static IP ranges. HMAC-SHA256 signature verification is more secure than IP allowlisting and works regardless of where the WooCommerce site is hosted.
+Schedule (10-minute):
+  EvaluateUptimeJob (reads uptime_checks from external probes, alerts after 2 consecutive downs from ≥2 probes)
+
+Schedule (monthly):
+  ReportMonthlyRevenueToStripeJob (1st, 06:00 UTC)
+  GenerateMonthlyReportJob (1st, 08:00 UTC)
+
+Schedule (yearly):
+  RefreshHolidaysJob (January 1st — regenerates global holidays table for all active countries)
+```
+
+**Critical dependency:** DetectAnomaliesJob must wait for BOTH daily snapshots AND baselines to complete. Use job chaining or completion check.
+
+### Queue assignments
+```
+critical  — webhook processing
+high      — OAuth token refresh
+default   — regular sync jobs, EvaluateUptimeJob
+low       — imports, snapshots, baselines, anomaly detection, AI, FX rates, cleanup, Lighthouse, reconciliation, refund sync
+```
+
+### GenerateAiSummaryJob skip conditions (updated)
+1. At least one workspace member (any role) has last_login_at within 7 days
+2. At least one integration in status = 'active'
+3. Summary doesn't already exist for today
+Same conditions apply to DetectAnomaliesJob.
 
 ---
 
-## Competitor Research
+## AI Alerts Enhancement
 
-### Klaviyo
-- Currency: converts each order at the day-of-transaction exchange rate (same approach as us)
-- Does NOT convert currencies for regular analytics — only in Benchmarks tab
-- No unified ad spend view — pure email/SMS marketing tool
+**AiSummaryService:**
+- Increase max_tokens 600 → 900
+- Split into two calls: narrative summary + dedicated anomaly-detection call with stricter system prompt
+- Anomaly call: output JSON array of 0-3 objects: {type, severity, detail}
+- Parsing hardening: strip markdown fences, try/catch json_decode, Log::warning on failures, case-insensitive preg_match
+- Strip anomaly block from display text before storing
 
-### Metorik
-- WooCommerce analytics specialist. Uses Open Exchange Rates for multi-currency (we use Frankfurter which is free and ECB-sourced)
-- No ad integration — pure store analytics
-- ~€50-150/mo flat pricing (no revenue-based model)
-
-### Triple Whale
-- Shopify-focused, limited WooCommerce support
-- Strong first-party attribution (pixel), no GSC
-- ~$300-500/mo for meaningful features — expensive for EU SMBs
-
-### AdScale / DataFeedWatch
-- Ad feed management + analytics. No store revenue view.
-- Different use case — feed optimization, not holistic analytics
-
-**Our differentiation:** Combined store revenue + ad spend + GSC in one dashboard, EUR-native, revenue-based pricing that scales with the customer.
+**GenerateAiSummaryJob:**
+- After upsert: validate type and severity against allowlists
+- 3-day deduplication before creating Alert records
+- Create with source = 'ai'
 
 ---
 
-## Full Implementation Reference
+## New Feature: Client Report PDF (Phase 1.5)
 
-*All of the following mirrors CLAUDE.md but with full explanatory context included.*
+Monthly AI-generated PDF per workspace. On-demand download from Insights page + auto-sent 1st of each month.
 
-### Setup Steps
-See CLAUDE.md §Setup for the exact commands. Key rationale:
-- **Breeze over Jetstream:** Jetstream is heavier. Breeze gives us just the auth views and leaves us free to build our own UI. We're not using Livewire (Jetstream's default).
-- **Cashier migrations manually:** Cashier's bundled migration assumes you bill `users`. We bill `workspaces`. Running Cashier's migration creates the wrong FK structure.
-- **shadcn components path:** Breeze creates `resources/js/`, not `src/`. shadcn defaults to `src/` which doesn't exist. The components path must be specified explicitly during init.
-- **PostgreSQL for tests:** Our schema uses PG-specific features (partial indexes, jsonb, bigserial, COALESCE in expression indexes) that are silently incompatible with SQLite. Never use SQLite in tests.
+**MVP content:** Revenue vs prior month with chart, ROAS performance, top 3 anomalies, GSC clicks trend, AI narrative (2-3 paragraphs).
 
----
+**Tech:** Blade template → PDF via `barryvdh/laravel-dompdf`. Stored on disk/S3.
 
-## Database Schema
-
-*Identical to CLAUDE.md §Database Schema. Reproduced here so PLANNING.md is complete.*
-
-### Core Tenant
-
-```sql
-users
-  id bigserial PK, name varchar(255), email varchar(255) UNIQUE
-  email_verified_at timestamp (nullable), password varchar(255)
-  is_super_admin boolean DEFAULT false, remember_token varchar(100) (nullable)
-  last_login_at timestamp (nullable)    -- GenerateAiSummaryJob skips workspaces where owner.last_login_at > 7 days
-  created_at, updated_at
-
-workspaces
-  id bigserial PK, name varchar(255), slug varchar(255) UNIQUE
-  -- slug: slugified name, Str::random(4) on collision, immutable after creation
-  owner_id bigint → users SET NULL    -- SET NULL is safety net; always assign new owner first
-  reporting_currency char(3) DEFAULT 'EUR'
-  reporting_timezone varchar(100) DEFAULT 'Europe/Berlin'
-  trial_ends_at timestamp (nullable)
-  billing_plan varchar(50) CHECK (billing_plan IN ('starter','growth','scale','percentage','enterprise')) (nullable)
-  plan_grace_ends_at timestamp (nullable)    -- 7-day grace on flat tier limit exceedance
-  stripe_id varchar(255) (nullable), pm_type varchar(255) (nullable), pm_last_four varchar(4) (nullable)
-  billing_name varchar(255) (nullable), billing_email varchar(255) (nullable)
-  billing_address jsonb (nullable)           -- {line1, line2, city, postal_code, country}
-  vat_number varchar(50) (nullable)          -- EU VAT for reverse charge
-  is_orphaned boolean DEFAULT false          -- true when owner deleted with no admins
-  deleted_at timestamp (nullable)            -- soft-delete; PurgeDeletedWorkspaceJob hard-deletes after 30 days
-  created_at, updated_at
-
-workspace_users  -- pivot
-  id bigserial PK
-  workspace_id → workspaces CASCADE, user_id → users CASCADE
-  role varchar(50) CHECK (role IN ('owner','admin','member'))
-  created_at, updated_at
-  UNIQUE(workspace_id, user_id); INDEX(user_id)
-
-workspace_invitations
-  id bigserial PK, workspace_id → workspaces CASCADE
-  email varchar(255), role varchar(50) CHECK (role IN ('admin','member'))
-  token varchar(255) UNIQUE       -- Str::random(64), stored as-is (not hashed)
-  expires_at timestamp, accepted_at timestamp (nullable)
-  created_at, updated_at
-  INDEX(workspace_id)
-```
-
-### Store Tables
-
-```sql
-stores
-  id bigserial PK, workspace_id → workspaces CASCADE
-  name varchar(255)
-  type varchar(50) CHECK (type IN ('woocommerce','shopify','magento','bigcommerce','prestashop','opencart'))
-  -- Add new platforms to CHECK when implementing. WooCommerce is only MVP platform.
-  domain varchar(255), currency char(3), timezone varchar(100) DEFAULT 'Europe/Berlin'
-  platform_store_id varchar(255) (nullable)
-  status varchar(50) DEFAULT 'connecting' CHECK (status IN ('connecting','active','error','disconnected'))
-  consecutive_sync_failures smallint DEFAULT 0    -- status→'error' at 3
-  -- Generic credential columns (map to each platform's auth model):
-  -- WooCommerce: auth_key=consumer_key, auth_secret=consumer_secret
-  -- Shopify: access_token=OAuth token
-  -- Magento 2: auth_key=consumer_key, auth_secret=consumer_secret, access_token=access_token
-  -- BigCommerce: auth_key=client_id, auth_secret=client_secret, access_token=access_token
-  -- PrestaShop/OpenCart: auth_key=api_key
-  auth_key_encrypted text (nullable)
-  auth_secret_encrypted text (nullable)
-  access_token_encrypted text (nullable)
-  refresh_token_encrypted text (nullable)
-  token_expires_at timestamp (nullable)
-  webhook_secret_encrypted text (nullable)
-  platform_webhook_ids jsonb (nullable)          -- {"order.created": 42, "order.updated": 43}
-  historical_import_status varchar(50) CHECK (historical_import_status IN ('pending','running','completed','failed')) (nullable)
-  historical_import_from date (nullable)
-  historical_import_checkpoint jsonb (nullable)  -- WooCommerce: {date_cursor: "YYYY-MM-DD"}; Shopify: {cursor: "..."}
-  historical_import_progress smallint (nullable) -- 0-100
-  historical_import_total_orders integer (nullable) -- X-WP-Total from count request; used for time estimate + progress calc
-  historical_import_started_at timestamp (nullable)
-  historical_import_completed_at timestamp (nullable)
-  historical_import_duration_seconds integer (nullable)
-  last_synced_at timestamp (nullable)
-  created_at, updated_at
-  UNIQUE(workspace_id, domain); INDEX(workspace_id)
-
-orders
-  id bigserial PK
-  workspace_id → workspaces CASCADE, store_id → stores CASCADE
-  external_id varchar(255), external_number varchar(255) (nullable)
-  status varchar(100) CHECK (status IN ('completed','processing','refunded','cancelled','other'))
-  currency char(3)
-  total numeric(12,4), subtotal numeric(12,4)
-  tax numeric(12,4) DEFAULT 0, shipping numeric(12,4) DEFAULT 0, discount numeric(12,4) DEFAULT 0
-  total_in_reporting_currency numeric(12,4) (nullable)
-  -- NULL if FX rate unavailable within 3 days. RetryMissingConversionJob handles nightly.
-  -- Dashboard excludes NULL values from totals and shows a warning.
-  -- NEVER treat NULL as 0.
-  customer_email_hash char(64) (nullable)    -- SHA-256(lowercase(trim(email))). GDPR: never store raw email.
-  customer_country char(2) (nullable)
-  utm_source varchar(255) (nullable), utm_medium varchar(255) (nullable)
-  utm_campaign varchar(255) (nullable), utm_content varchar(255) (nullable)
-  occurred_at timestamp, synced_at timestamp
-  created_at, updated_at
-  UNIQUE(store_id, external_id)
-  INDEX(workspace_id, occurred_at)
-  INDEX(workspace_id, store_id, occurred_at)
-  INDEX(workspace_id, customer_country, occurred_at)
-  INDEX(store_id, synced_at)
-
-order_items
-  id bigserial PK
-  order_id → orders CASCADE
-  workspace_id → workspaces CASCADE, store_id → stores CASCADE
-  product_external_id varchar(255), product_name varchar(500)
-  variant_name varchar(255) (nullable), sku varchar(255) (nullable)
-  quantity integer, unit_price numeric(12,4), line_total numeric(12,4)
-  created_at, updated_at
-  -- Expression index for upsert (nullable variant_name breaks standard UNIQUE):
-  -- CREATE UNIQUE INDEX order_items_upsert_key ON order_items (order_id, product_external_id, COALESCE(variant_name, ''));
-  INDEX(workspace_id, product_external_id); INDEX(order_id)
-
-products
-  id bigserial PK, workspace_id → workspaces CASCADE, store_id → stores CASCADE
-  external_id varchar(255), name varchar(500)
-  sku varchar(255) (nullable), price numeric(12,4) (nullable), status varchar(100) (nullable)
-  image_url text (nullable), product_url text (nullable)
-  platform_updated_at timestamp (nullable)    -- used for incremental sync filter
-  created_at, updated_at
-  UNIQUE(store_id, external_id); INDEX(workspace_id, store_id)
-```
-
-### Ad Tables
-
-```sql
-ad_accounts
-  id bigserial PK, workspace_id → workspaces CASCADE
-  platform varchar(50) CHECK (platform IN ('facebook','google'))
-  external_id varchar(255), name varchar(255), currency char(3)
-  access_token_encrypted text (nullable), refresh_token_encrypted text (nullable)
-  token_expires_at timestamp (nullable)
-  status varchar(50) DEFAULT 'active' CHECK (status IN ('active','error','token_expired','disconnected'))
-  consecutive_sync_failures smallint DEFAULT 0
-  last_synced_at timestamp (nullable)
-  created_at, updated_at
-  UNIQUE(workspace_id, platform, external_id); INDEX(workspace_id)
-
-campaigns
-  id bigserial PK, workspace_id → workspaces CASCADE, ad_account_id → ad_accounts CASCADE
-  external_id varchar(255), name varchar(500), status varchar(100) (nullable), objective varchar(100) (nullable)
-  created_at, updated_at
-  UNIQUE(ad_account_id, external_id); INDEX(workspace_id, ad_account_id)
-
-adsets
-  id bigserial PK, workspace_id → workspaces CASCADE, campaign_id → campaigns CASCADE
-  external_id varchar(255), name varchar(500), status varchar(100) (nullable)
-  created_at, updated_at
-  UNIQUE(campaign_id, external_id); INDEX(workspace_id)
-
-ads
-  id bigserial PK, workspace_id → workspaces CASCADE, adset_id → adsets CASCADE
-  external_id varchar(255), name varchar(500) (nullable), status varchar(100) (nullable)
-  destination_url text (nullable)    -- Phase 2 ad↔page correlation
-  created_at, updated_at
-  UNIQUE(adset_id, external_id); INDEX(workspace_id)
-
--- level IN ('campaign','ad') only. 'account' and 'adset' levels never inserted.
--- campaign_id/adset_id/ad_id are SET NULL (not CASCADE) so historical insight rows
--- survive when an ad account is disconnected and its campaigns are deleted.
-ad_insights
-  id bigserial PK
-  workspace_id → workspaces CASCADE, ad_account_id → ad_accounts SET NULL (nullable)  -- SET NULL: insight rows survive ad account disconnection
-  level varchar(20) NOT NULL CHECK (level IN ('campaign','ad'))
-  campaign_id → campaigns SET NULL (nullable)
-  adset_id → adsets SET NULL (nullable)
-  ad_id → ads SET NULL (nullable)
-  date date, hour smallint (nullable)    -- NULL=daily, 0-23=hourly
-  spend numeric(12,4) DEFAULT 0
-  spend_in_reporting_currency numeric(12,4) (nullable)
-  impressions bigint DEFAULT 0, clicks bigint DEFAULT 0, reach bigint (nullable)
-  ctr numeric(8,6) (nullable), cpc numeric(10,4) (nullable)
-  platform_roas numeric(10,4) (nullable)
-  currency char(3)
-  created_at, updated_at
-  INDEX(workspace_id, ad_account_id, date)
-  INDEX(workspace_id, campaign_id, date)
-  INDEX(workspace_id, ad_id, date)
-  INDEX(workspace_id, date)
-  -- Partial unique indexes (PostgreSQL partial index syntax: ON table (cols) WHERE condition)
-  -- CREATE UNIQUE INDEX ai_campaign_daily_unique  ON ad_insights (campaign_id, date)       WHERE level='campaign' AND hour IS NULL;
-  -- CREATE UNIQUE INDEX ai_campaign_hourly_unique ON ad_insights (campaign_id, date, hour) WHERE level='campaign' AND hour IS NOT NULL;
-  -- CREATE UNIQUE INDEX ai_ad_daily_unique        ON ad_insights (ad_id, date)             WHERE level='ad' AND hour IS NULL;
-  -- CREATE UNIQUE INDEX ai_ad_hourly_unique       ON ad_insights (ad_id, date, hour)       WHERE level='ad' AND hour IS NOT NULL;
-```
-
-### Aggregation Tables
-
-```sql
--- NEVER query raw orders for dashboard page requests.
--- ComputeDailySnapshotJob accepts constructor params: (int $storeId, Carbon $date)
---   The nightly scheduled entry is a dispatcher (DispatchDailySnapshots): iterates all active
---   stores, dispatches one child job per store for yesterday's date. After historical import:
---   one child job per imported date for that store. Fully idempotent (ON CONFLICT DO UPDATE).
--- Revenue source: SUM(total_in_reporting_currency) for status IN ('completed','processing')
--- top_products computed from orders JOIN order_items, line revenue = line_total × (total_in_reporting_currency / NULLIF(total, 0))
-daily_snapshots
-  id bigserial PK, workspace_id → workspaces CASCADE, store_id → stores CASCADE
-  date date
-  orders_count integer DEFAULT 0
-  revenue numeric(14,4) DEFAULT 0          -- in reporting_currency
-  revenue_native numeric(14,4) DEFAULT 0   -- in store's native currency (no FX)
-  aov numeric(10,4) (nullable)             -- revenue/orders_count; NULL if 0 orders
-  items_sold integer DEFAULT 0
-  items_per_order numeric(6,2) (nullable)
-  new_customers integer DEFAULT 0          -- first-time customer_email_hash (non-NULL only)
-  returning_customers integer DEFAULT 0
-  revenue_by_country jsonb (nullable)      -- {"DE": 3200.00, "AT": 1800.00}
-  top_products jsonb (nullable)            -- [{external_id, name, units, revenue}] top 10
-  created_at, updated_at
-  UNIQUE(store_id, date)
-  INDEX(workspace_id, date); INDEX(workspace_id, store_id, date)
-
--- Retained forever.
--- Stored UTC; convert to store timezone on display.
--- Computed nightly at 00:45 UTC for previous day's hours. "Today" hourly data is not
--- available until the next nightly run — UI defaults today's view to daily granularity.
-hourly_snapshots
-  id bigserial PK, workspace_id → workspaces CASCADE, store_id → stores CASCADE
-  date date, hour smallint    -- 0-23 UTC
-  orders_count integer DEFAULT 0, revenue numeric(14,4) DEFAULT 0
-  created_at, updated_at
-  UNIQUE(store_id, date, hour); INDEX(workspace_id, store_id, date)
-```
-
-### SEO Tables
-
-```sql
--- GSC has 2-3 day reporting lag. Last 3 days marked as "data may be incomplete" in UI.
--- All GSC data upserted (ON CONFLICT DO UPDATE) on every sync — GSC revises recent data.
-search_console_properties
-  id bigserial PK, workspace_id → workspaces CASCADE
-  store_id → stores SET NULL (nullable)    -- auto-linked if domain matches; survives store deletion
-  property_url varchar(500)
-  access_token_encrypted text (nullable), refresh_token_encrypted text (nullable)
-  token_expires_at timestamp (nullable)
-  status varchar(50) DEFAULT 'active' CHECK (status IN ('active','error','token_expired','disconnected'))
-  consecutive_sync_failures smallint DEFAULT 0
-  last_synced_at timestamp (nullable)
-  created_at, updated_at
-  UNIQUE(workspace_id, property_url); INDEX(workspace_id)
-
-gsc_daily_stats
-  id bigserial PK, property_id → search_console_properties CASCADE
-  workspace_id → workspaces CASCADE
-  date date, clicks integer DEFAULT 0, impressions integer DEFAULT 0
-  ctr numeric(8,6) (nullable), position numeric(6,2) (nullable)
-  created_at, updated_at
-  UNIQUE(property_id, date); INDEX(workspace_id, date)
-
-gsc_queries   -- top 1,000 per property per day. Retained forever.
-  id bigserial PK, property_id → search_console_properties CASCADE
-  workspace_id → workspaces CASCADE
-  date date, query varchar(500)    -- 500 chars keeps well under PG B-tree ~2704 byte limit
-  clicks integer DEFAULT 0, impressions integer DEFAULT 0
-  ctr numeric(8,6) (nullable), position numeric(6,2) (nullable)
-  created_at, updated_at
-  UNIQUE(property_id, date, query); INDEX(workspace_id, date)
-
-gsc_pages   -- top 1,000 per property per day. Retained forever.
-  id bigserial PK, property_id → search_console_properties CASCADE
-  workspace_id → workspaces CASCADE
-  date date, page varchar(2000)    -- varchar not text; truncate URLs > 2000 chars
-  clicks integer DEFAULT 0, impressions integer DEFAULT 0
-  ctr numeric(8,6) (nullable), position numeric(6,2) (nullable)
-  created_at, updated_at
-  UNIQUE(property_id, date, page); INDEX(property_id, date); INDEX(workspace_id, date)
-```
-
-### Cashier / Billing Tables
-
-```sql
--- Define in your own migration. Do NOT run Cashier's bundled migration.
-subscriptions
-  id bigserial PK
-  billable_type varchar(255)    -- 'App\Models\Workspace'
-  billable_id bigint
-  type varchar(255)             -- always 'default'
-  stripe_id varchar(255) UNIQUE, stripe_status varchar(255)
-  stripe_price varchar(255) (nullable), quantity integer (nullable)
-  trial_ends_at timestamp (nullable), ends_at timestamp (nullable)
-  created_at, updated_at
-  INDEX(billable_type, billable_id, stripe_status)
-
-subscription_items
-  id bigserial PK, subscription_id → subscriptions CASCADE
-  stripe_id varchar(255) UNIQUE
-  stripe_product varchar(255) (nullable), stripe_price varchar(255)
-  quantity integer (nullable)
-  created_at, updated_at
-  INDEX(subscription_id, stripe_price)
-```
-
-### System / Operational Tables
-
-```sql
--- DB is the cache. Two fetch flows:
--- 1. Daily: UpdateFxRatesJob → GET {FRANKFURTER_API_URL}/rates?base=EUR (ongoing)
--- 2. Historical import: fetch missing date ranges → GET /rates?from={start}&to={end}&base=EUR
--- Frankfurter: no monthly/daily quotas, rate-limited to prevent abuse only. Self-host via Docker if needed.
-fx_rates
-  id bigserial PK, base_currency char(3) DEFAULT 'EUR'
-  target_currency char(3), rate numeric(16,8), date date
-  created_at timestamp    -- no updated_at: historical rates are fixed, never revised
-  UNIQUE(base_currency, target_currency, date); INDEX(date)
-
-sync_logs    -- every job writes on start, updates on completion/failure
-  id bigserial PK, workspace_id → workspaces CASCADE
-  syncable_type varchar(255), syncable_id bigint    -- polymorphic
-  job_type varchar(100)
-  status varchar(50) CHECK (status IN ('running','completed','failed'))
-  records_processed integer (nullable), error_message text (nullable)
-  started_at timestamp (nullable), completed_at timestamp (nullable)
-  duration_seconds integer (nullable)    -- enables import time estimates
-  created_at, updated_at
-  INDEX(workspace_id, syncable_type, syncable_id); INDEX(status, created_at)
-
--- Raw webhook payload for debugging and replay.
--- GDPR: may contain customer PII. Legitimate interest (debugging). Purged after 30 days.
--- Never expose payload in UI.
-webhook_logs
-  id bigserial PK, store_id → stores CASCADE, workspace_id → workspaces CASCADE
-  event varchar(255), payload jsonb
-  signature_valid boolean
-  status varchar(50) DEFAULT 'pending' CHECK (status IN ('pending','processed','failed'))
-  error_message text (nullable), processed_at timestamp (nullable)
-  created_at, updated_at
-  INDEX(store_id, created_at)
-
-ai_summaries    -- Retained forever. ON CONFLICT DO UPDATE for re-generation.
-  id bigserial PK, workspace_id → workspaces CASCADE
-  date date, summary_text text
-  payload_sent jsonb (nullable)       -- JSON sent to Anthropic (debugging)
-  model_used varchar(100) (nullable), generated_at timestamp
-  created_at, updated_at
-  UNIQUE(workspace_id, date); INDEX(workspace_id, date)
-
-alerts    -- system-detected issues surfaced in the UI alert feed
-  id bigserial PK, workspace_id → workspaces CASCADE
-  store_id → stores (nullable, CASCADE)
-  ad_account_id → ad_accounts (nullable, CASCADE)
-  type varchar(100)    -- sync_failed|token_expired|ssl_expiry|etc.
-  severity varchar(50) CHECK (severity IN ('info','warning','critical'))
-  data jsonb (nullable)    -- arbitrary metadata (e.g. property_id for GSC alerts)
-  read_at timestamp (nullable), resolved_at timestamp (nullable)
-  created_at, updated_at
-  INDEX(workspace_id, resolved_at, created_at)
-```
+**Job:** GenerateMonthlyReportJob — 1st of month 08:00 UTC + on-demand trigger. Queue: low.
 
 ---
 
-## Key Business Logic
+## New Feature: HTTP-Based Checkout Health Check (Phase 2)
 
-### ROAS and Blended ROAS
-```
-ROAS = SUM(daily_snapshots.revenue) / SUM(ad_insights.spend_in_reporting_currency WHERE level='campaign')
-Blended ROAS = same without store_id or ad_account_id filter
-```
-- Pre-converted at sync time. No FX lookup at query time.
-- `SUM(spend) = 0` → display "N/A"
-- Always filter `ad_insights` by exactly one `level`. Never SUM across levels.
+Interim alternative to full Playwright synthetic checkout. Defers Playwright to Phase 3+.
 
-### FX Rate Lookup
-```
-1. Query fx_rates WHERE date = $date              → found → return
-2. Not found → look back 3 days for nearest rate  → return
-3. Still not found → throw FxRateNotFoundException
-   → callers: log warning, leave NULL
-   → RetryMissingConversionJob retries nightly
+**Logic:**
+1. Fetch `/cart/?add-to-cart={product_id}` with a known product ID (configurable per store in settings)
+2. Check for HTTP 200 + session cookie
+3. Fetch `/cart/` and check for `cart-contents` or `woocommerce-cart-form` in HTML
+4. If either fails → alert with source='rule', type='checkout_health'
 
-Four-case conversion (all FX rates base=EUR):
-1. order.currency == reporting_currency → return total (no-op)
-2. order.currency == 'EUR'             → total × rate_EUR_to_reporting
-3. reporting_currency == 'EUR'         → total / rate_EUR_to_order
-4. neither is EUR                      → total × (rate_EUR_to_reporting / rate_EUR_to_order)
-```
+**Catches:** broken checkout plugins, fatal errors, WAF blocks, theme crashes.
+**Doesn't catch:** JS-dependent cart failures, payment gateway issues.
 
-### Dashboard Query Rules
-- Cards/charts → `daily_snapshots`, `hourly_snapshots`
-- Ad metrics → `ad_insights`
-- Top products → `daily_snapshots.top_products` JSONB
-- Country revenue → `daily_snapshots.revenue_by_country` JSONB
-- Country top products → `orders JOIN order_items WHERE customer_country = ?` (filtered, acceptable)
-- Weekly (>90 days range) → `DATE_TRUNC('week', date)` on `daily_snapshots`
-- Raw `orders` → background jobs only. Never in page requests.
+~2 hours to implement. Good signal-to-effort ratio.
 
 ---
 
-## Integrations
+## New Feature: Multi-Workspace Overview (Phase 3)
 
-### WooCommerce
-**Auth:** Consumer key + secret, Basic auth.
-**Validate:** `GET {domain}/wp-json/wc/v3/system_status` → 200 = connected
-**Webhooks:** Register `order.created`, `order.updated`, `order.deleted`. Store `webhook_secret_encrypted` from response. Verify `X-WC-Webhook-Signature`: `base64(HMAC-SHA256(rawBody, secret))`.
-On reconnect: delete old webhooks first (`DELETE /wp-json/wc/v3/webhooks/{id}`), ignore 404.
-`order.deleted` → set status='cancelled', never hard-delete.
+When user belongs to >1 workspace: "All Workspaces" view from workspace switcher.
 
-**Historical import endpoint (30-day chunks):**
-`GET /wp-json/wc/v3/orders?after={chunk_start_ISO}&before={chunk_end_ISO}&orderby=date&order=asc&per_page=100&page={n}`
+**Page: /workspaces/overview**
+- Card per workspace: 30d revenue trend, ROAS, GSC clicks trend, performance score, last sync status, unresolved alert count
+- Sorted by most unresolved alerts first
+- Quick workspace switch
 
-**Order field mapping:**
-| DB | WooCommerce |
+---
+
+## Data Retention Policy
+
+### uptime_checks
+- 10-min intervals via external probes. Growth depends on probe count x URL count. Table partitioned by month.
+- Keep raw 30 days (not 90 — partitioned table with monthly drops keeps this manageable)
+- Aggregate to uptime_daily_summaries before partition drop
+- CleanupPerformanceDataJob (Sunday 04:00 UTC) — drops old partitions, creates future partitions
+
+### lighthouse_snapshots
+- Daily checks, slow growth. Keep raw 12 months.
+- Aggregate monthly averages after 12 months.
+
+### gsc_queries and gsc_pages
+- Retain indefinitely for now. Revisit at 6 months — consider 18 months raw, indefinite monthly aggregates.
+
+### sync_logs and webhook_logs
+- Existing cleanup jobs. Retention configurable, not hardcoded.
+
+### Cancelled workspace data
+- After 90 days of cancelled workspace with no payment attempts: delete per GDPR.
+
+---
+
+## Business Logic to Preserve
+
+### Formulas
+- `ROAS = SUM(daily_snapshots.revenue) / SUM(ad_insights.spend_in_reporting_currency WHERE level='campaign')`
+- `Blended ROAS` = same, no store/account filter
+- `AOV = revenue / orders_count` (completed + processing only)
+- `Marketing % = (SUM(ad_insights.spend) / SUM(revenue)) * 100`
+- `CPO = SUM(ad_insights.spend_in_reporting_currency) / orders_count` (null if either zero — display "N/A")
+- Real ROAS per campaign = UTM-attributed orders matched to campaign name (case-insensitive), revenue sum / campaign spend
+- UTM source matching: facebook → ('facebook','fb','ig','instagram'); google → ('google','cpc','google-ads','ppc')
+- **Never divide by zero. Never SUM across ad_insights levels. Never aggregate raw orders in page requests.**
+- All values pre-converted to reporting_currency at sync time. Never join fx_rates at query time.
+- CPM, CPC, CPA: compute on the fly in SQL with NULLIF, do NOT store as columns (derived values drift when base data is fixed).
+
+### Which table to query
+- Dashboard metric cards/charts → daily_snapshots, hourly_snapshots
+- Ad metrics → ad_insights (always single level filter)
+- Top products → daily_snapshot_products (normalized)
+- Country breakdown → query orders directly (indexed)
+- Weekly range (>90 days) → aggregate daily_snapshots with DATE_TRUNC('week', date)
+
+### FX Rate conversion
+DB-first: fx_rates is the cache. Never call Frankfurter API from FxRateService.
+1. Query fx_rates WHERE date = $date → found → return
+2. Not found → look back up to 3 days → return
+3. Still not found → throw FxRateNotFoundException → callers log warning, leave total_in_reporting_currency = NULL
+4. RetryMissingConversionJob handles NULLs nightly
+
+Four-case conversion (unchanged from current):
+1. order.currency == reporting_currency → return as-is
+2. order.currency == 'EUR' → total * rate_EUR_to_reporting
+3. reporting_currency == 'EUR' → total / rate_EUR_to_order
+4. Neither is EUR → total * (rate_EUR_to_reporting / rate_EUR_to_order)
+
+### Integration-specific rules
+- **Facebook Ads**: re-sync last 3 days (Facebook revises recent figures). No refresh token — long-lived only. Alert 7 days before expiry.
+- **Google Ads**: API v17+ with GAQL. Refresh token within 5 minutes of expiry. No hourly data.
+- **GSC**: query last 5 days every run (2-3 day lag). Sync every 6 hours. Auto-link property to store if domain matches. Mark last 3 days as "data may be incomplete."
+- **WooCommerce**: hourly fallback if no webhooks in 90 min. Product webhooks (product.updated) registered alongside order webhooks.
+
+### Job infrastructure rules
+- Rate limit: `$this->release($e->retryAfter ?? 60)` — re-queue without consuming retry
+- Token expiry: `$this->fail($e)` — permanent failure, create alert
+- Failure chain: sync_logs failed → increment consecutive_sync_failures (after all retries) → alert (warning at 1, critical at 3+) → status='error' at 3+. Success → reset, restore active only if was error (never restore disconnected).
+- All synced data: upsert() only, never insert()
+- New jobs follow same failure handling chain.
+
+### Workspace rules
+- One owner always. Cannot leave without transferring.
+- Owner deletion → transfer to oldest Admin → if none, is_orphaned = true
+- Deletion blocked if open Stripe invoices or active subscription
+- Soft-delete → 30-day cancellation → hard delete via PurgeDeletedWorkspaceJob
+- Invitations: 7-day expiry, Str::random(64) token
+
+---
+
+## Implementation Sequence
+
+### Phase 0: Foundations (schema + data capture only)
+1. Rewrite all migrations cleanly with schema changes above (all tables including holidays, workspace_events, metric_baselines, uptime tables — schema only, no jobs yet for intelligence/uptime)
+2. Extract `StoreConnector` interface, adapt WooCommerceClient
+3. Extract `RevenueAttributionService` (single method for UTM-attributed revenue)
+4. Install `azuyalabs/yasumi` + `RefreshHolidaysJob` (populates global holidays table by country)
+5. Register product webhooks (product.updated) in ConnectStoreAction + handle in WooCommerceWebhookController
+6. Add budget/bid fields to campaigns, sync from Facebook/Google in existing jobs
+7. Add stock_status/stock_quantity sync to SyncProductsJob
+8. Add product categories sync (product_categories table + pivot)
+9. Add coupon capture (order_coupons table) to UpsertWooCommerceOrderAction
+10. Add refunds table + SyncRecentRefundsJob
+11. Add GSC device + country dimensions to sync jobs and tables
+12. Add all new promoted columns (payment_method, shipping_country, frequency, conversions, search_impression_share, etc.)
+13. Add JSONB capture columns (creative_data, raw_insights, raw_meta) with API version pairing
+14. Update ComputeDailySnapshotJob → write to daily_snapshot_products
+15. Update all controllers reading old JSONB columns
+16. Add workspace integration flags (has_store, has_ads, has_gsc, has_psi)
+17. Add workspace country field + auto-detection logic (ccTLD → IP geolocation → Stripe fallback)
+
+### Phase 1: MVP launch (reporting + data visibility)
+18. New nav structure in AppLayout.tsx using integration flags from shared props
+19. Dashboard cross-channel view (priority-tier layout, hero row + collapsible channels). **Day-1 empty state:** raw metrics + week-over-week deltas + "anomaly detection learning your baseline: X/28 days" progress indicator. Design this explicitly — it's what trial users see before intelligence kicks in.
+20. MultiSeriesLineChart + GSC clicks series + event overlays (daily_notes, holidays, workspace_events)
+21. SEO page: Unattributed Revenue cards
+22. Campaigns page: store revenue context cards + spend velocity + ROAS explanation tooltips
+23. Products page: trending deltas + stock status badges
+24. Performance page (/performance) + PerformanceController + RunLighthouseCheckJob (PSI/Lighthouse only — no uptime polling yet)
+25. Store settings: URL management UI
+26. Billing restructure: 3-tier (Starter/Growth/Scale), ad-spend-based billing for non-ecom, trial logic, trial expiry freeze
+27. Onboarding update: single-screen connection tiles, optional store, country auto-detect
+28. Workspace events: manual promotion/event creation UI + chart overlay markers
+29. Notification preferences UI + schema
+30. Webhook health: ReconcileStoreOrdersJob + sync status display on Integrations page
+31. Daily notes: prominent input + chart annotations
+32. Admin workspace impersonation (half-day task — needed before first "my data looks wrong" ticket)
+33. Data accuracy FAQ + contextual "why don't numbers match?" links in UI (next to Platform ROAS tooltip, GSC numbers with lag note, Woo order counts with webhook/reconciliation timing)
+34. Trial reactivation backfill sync (on payment after freeze, trigger catch-up import for the gap period)
+
+**Beta stores:** Onboard 2-3 own stores during Phase 1 build. Data needs to flow for ≥4 weeks before Phase 2 anomaly detection can begin silent mode tuning.
+
+### Phase 1.5: Reports
+35. GenerateMonthlyReportJob + Blade template + barryvdh/laravel-dompdf
+36. On-demand trigger from Insights page + monthly scheduled dispatch
+
+### Phase 2: Intelligence (anomaly detection + correlation engine)
+37. ComputeMetricBaselinesJob (rolling median + MAD per metric per weekday). **On first run, use all available historical daily_snapshots** — not just forward-accumulated data. If a store imports 3 months of orders at connection, baselines are ready on day 1 of Phase 2, not day 42.
+38. DetectAnomaliesJob (silent mode) + all individual signal detectors
+39. correlateSignals() — ordered investigation chain with weights
+40. Composite alerts with prose narratives + revenue impact estimates
+41. AI structured anomaly output (two-call approach) + Alert creation with deduplication
+42. Coupon auto-promotion detection
+43. CTR Opportunities section on SEO page
+44. HTTP-based interim checkout health check
+45. Payment gateway failure detection
+46. Refund anomaly detection
+47. Uptime system: external probe scripts (10-min intervals) + API endpoints (`GET /api/uptime/targets`, `POST /api/uptime/report`) + `EvaluateUptimeJob` (2 consecutive downs from ≥2 probes before alerting)
+48. Flip is_silent default to false (after SILENT_MODE_GRADUATION criteria met)
+
+### Phase 3: Depth
+49. Shopify connector (implements StoreConnector interface)
+50. Google Ads keyword sync (GAQL) + google_ads_keywords table population
+51. Keyword cannibalization detection + SEO page surface
+52. Multi-workspace overview (/workspaces/overview)
+53. Extended report content (performance, per-store, cannibalization)
+54. Consolidated agency billing (billing_workspace_id, group tier calculation)
+55. Add performance signals to correlateSignals()
+
+### Phase 4: Advanced
+56. Full Playwright synthetic checkout (Node microservice, dedicated queue/supervisor)
+57. Multi-region uptime probes
+58. ML seasonality service (separate Python FastAPI, own schema, Phase 3+ trigger at 100-500 active stores)
+59. Causal tree visualization for correlation narratives
+60. Advanced attribution modeling
+61. Slack/Discord/Telegram notification webhooks
+62. Additional connectors (BigCommerce, Magento)
+
+---
+
+## Phase Enforcement Rule
+
+Phase N+1 cannot ship to production until Phase N verification checklist is complete. Parallel development on feature branches is allowed — but merging to main requires the prior phase to be signed off. Each phase ends with a sign-off checklist matching verification steps below.
+
+## Operational Prerequisites (before Phase 1 launch)
+
+**Database backups:** Automated point-in-time recovery configured. Retention period documented. Test-restore procedure executed at least once before first real customer data flows.
+
+**GDPR data export/deletion:** Must support within 30 days of request per GDPR. Workspace deletion flow (90-day) exists. Add: user data export endpoint (all data for a user/workspace as JSON/CSV) — ship in Phase 1.5 or Phase 2 at latest.
+
+**Observability:** Horizon gives basic job failure visibility but not business-metric monitoring. Add internal system_health dashboard (not customer-facing) in Phase 2 showing: per-job success rates, baseline update lag, anomaly detection firing rates, sync freshness per workspace. This catches "ComputeMetricBaselinesJob silently failing on 10% of workspaces."
+
+## Risk: Beta Data Contingency
+
+Silent mode tuning needs 2-3 real stores (own stores) with real data for ≥4 weeks. Stores must be onboarded and syncing during Phase 1 so baselines are ready when Phase 2 anomaly detection begins. Alert feed remains in silent mode until stores have ≥4 weeks of baseline data and ≥20 silent alerts have been reviewed. Making this explicit prevents flipping silent mode early under schedule pressure.
+
+---
+
+## Critical Files to Modify
+
+| File | Change |
 |---|---|
-| external_id | id (cast to string) |
-| external_number | number |
-| status | completed→completed, processing→processing, refunded→refunded, cancelled→cancelled, else→other |
-| total | total (string→float) |
-| subtotal | subtotal |
-| tax | total_tax |
-| shipping | shipping_total |
-| discount | discount_total |
-| customer_email_hash | SHA-256(lowercase(trim(billing.email))) |
-| customer_country | billing.country |
-| utm_source/medium/campaign/content | meta_data _utm_* keys |
-| occurred_at | date_created_gmt UTC |
+| `database/migrations/*` | Rewrite clean migrations |
+| `app/Jobs/ComputeDailySnapshotJob.php` | Write to daily_snapshot_products |
+| `app/Jobs/SyncAdInsightsJob.php` | Capture frequency, conversions, search_impression_share, raw_insights JSONB |
+| `app/Jobs/SyncSearchConsoleJob.php` | Add device + country dimensions |
+| `app/Jobs/SyncProductsJob.php` | Add stock, categories, product_type |
+| `app/Jobs/SyncStoreOrdersJob.php` | Capture payment_method, shipping_country, coupons, customer_id |
+| `app/Actions/UpsertWooCommerceOrderAction.php` | Map new order fields + create order_coupons |
+| `app/Actions/ConnectStoreAction.php` | Register product.updated webhook |
+| `app/Http/Controllers/DashboardController.php` | Full cross-channel priority-tier data |
+| `app/Http/Controllers/AnalyticsController.php` | Products: daily_snapshot_products + trending |
+| `app/Http/Controllers/SeoController.php` | Add revenue context |
+| `app/Http/Controllers/CampaignsController.php` | Add organic revenue + spend velocity |
+| `app/Http/Controllers/BillingController.php` | 3-tier billing + ad-spend billing + trial expiry |
+| `app/Jobs/ReportMonthlyRevenueToStripeJob.php` | Ad-spend billing for non-ecom, 1% GMV / 2% ad spend Scale tier |
+| `app/Services/Ai/AiSummaryService.php` | Two-call approach, structured anomaly output |
+| `app/Jobs/GenerateAiSummaryJob.php` | Updated skip logic, Alert creation |
+| `app/Services/Integrations/Facebook/FacebookAdsClient.php` | Request frequency, creative data |
+| `app/Services/Integrations/Google/GoogleAdsClient.php` | Request conversions, search_impression_share, budgets |
+| `app/Services/Integrations/SearchConsole/SearchConsoleClient.php` | Add device + country dimensions |
+| `app/Http/Controllers/WooCommerceWebhookController.php` | Handle product.updated |
+| `app/Http/Controllers/InsightsController.php` | Render prose narratives with [View details] [Dismiss] [This was expected] actions, handle is_silent filtering |
+| `resources/js/Components/layouts/AppLayout.tsx` | New nav, conditional sections |
+| `resources/js/Components/charts/MultiSeriesLineChart.tsx` | Event overlays, GSC series |
+| `resources/js/Pages/Dashboard.tsx` | Priority-tier layout |
+| `config/billing.php` | 3-tier structure (Starter/Growth/Scale), ad-spend equivalents |
+| `config/horizon.php` | Phase 4: Add browser supervisor for Playwright synthetic checkout |
 
-**Order items from line_items:**
-| DB | WooCommerce |
+## New Files to Create
+
+| File | Purpose |
 |---|---|
-| product_external_id | product_id cast to string |
-| product_name | name |
-| variant_name | concatenate attribute meta_data display values; NULL if no variation |
-| sku | sku |
-| quantity | quantity |
-| unit_price | price string→float |
-| line_total | total string→float |
-
-**Products:**
-- On connection: `GET /wp-json/wc/v3/products?per_page=100` (paginated, upsert all)
-- Nightly: `GET /wp-json/wc/v3/products?modified_after={ISO}&per_page=100`
-
-| DB | WooCommerce |
-|---|---|
-| external_id | id cast to string |
-| name | name |
-| sku | sku |
-| price | price string→float |
-| status | status |
-| image_url | images[0].src |
-| product_url | permalink |
-| platform_updated_at | date_modified_gmt |
-
-**Store metadata (from system_status):**
-- name → environment.site_title
-- currency → settings.currency
-- timezone → environment.timezone
-
-**Historical time estimate:** Before dispatching the import job, make a lightweight count request: `GET /wp-json/wc/v3/orders?after={start_date_ISO}&per_page=1` and read `X-WP-Total`. If prior `sync_logs` exist: `X-WP-Total × AVG(duration_seconds / records_processed)` → show "~N minutes". If no prior logs: use ~1 minute per 1,000 orders heuristic.
-
-### Shopify (Phase 2)
-
-**Auth:** Admin API access token (user creates in Shopify Admin → Settings → Apps → Develop Apps).
-**API version:** `2026-04` (current stable). Always specify in URL. Update quarterly.
-**Validate:** `GET /admin/api/2026-04/shop.json` with `X-Shopify-Access-Token` header → 200 = connected.
-**Webhooks:** `POST /admin/api/2026-04/webhooks.json` for `orders/create`, `orders/updated`, `orders/cancelled`. Store webhook secret from response. Verify `X-Shopify-Hmac-Sha256`.
-`orders/cancelled` → set status='cancelled' (same as WooCommerce order.deleted).
-**Pagination:** cursor-based via `Link` header. Never use page numbers.
-
-**Order field mapping:**
-| DB | Shopify |
-|---|---|
-| external_id | id cast to string |
-| external_number | order_number |
-| status | paid→completed, partially_paid/pending/authorized/partially_refunded→processing, refunded→refunded, voided/cancelled_at→cancelled, else→other |
-| currency | presentment_currency |
-| total | total_price string→float |
-| subtotal | subtotal_price |
-| tax | total_tax |
-| shipping | SUM(shipping_lines[].price) |
-| discount | total_discounts |
-| customer_email_hash | SHA-256(lowercase(trim(email))) |
-| customer_country | billing_address.country_code |
-| utm_source/medium/campaign/content | note_attributes or parse landing_site |
-| occurred_at | created_at UTC |
-
-**Order items from line_items:**
-| DB | Shopify |
-|---|---|
-| product_external_id | product_id cast to string |
-| product_name | title |
-| variant_name | variant_title (NULL if "Default Title") |
-| sku | sku |
-| quantity | quantity |
-| unit_price | price string→float |
-| line_total | (price × quantity) - total_discount |
-
-**Store metadata (from shop.json):**
-- name → shop.name
-- currency → shop.currency
-- timezone → shop.iana_timezone
-
-**Products:** `GET /admin/api/2026-04/products.json?limit=250` (cursor-paginated on connection). Nightly: `GET /admin/api/2026-04/products.json?updated_at_min={ISO}&limit=250`.
-
-| DB | Shopify |
-|---|---|
-| external_id | id cast to string |
-| name | title |
-| sku | variants[0].sku |
-| price | variants[0].price string→float |
-| status | status (active/draft/archived) |
-| image_url | image.src |
-| product_url | {store_domain}/products/{handle} |
-| platform_updated_at | updated_at |
-
-### Facebook Ads
-See CLAUDE.md §Facebook Ads for full OAuth flow and field mappings. Key notes:
-
-**Why long-lived token immediately:** Short-lived token expires in ~2 hours. Exchange window is small. Must exchange immediately after OAuth before returning to the user.
-
-**Developer approval:** Apply for Advanced Access as early as possible. 2-6 weeks with: live demo URL, screencast video, privacy policy, business verification. Without it, can only use own test ad account.
-
-**Historical data limit:** ~37 months. Inform users at connection time.
-
-**Insights endpoint:** `GET https://graph.facebook.com/v20.0/act_{adAccountId}/insights`
-Params: `level`, `fields=spend,impressions,clicks,reach,ctr,cpc,purchase_roas,account_currency`, `time_range={"since":"...","until":"..."}`, `time_increment=1` (or `hourly`)
-
-Always re-sync last 3 days (Facebook revises recent figures with late attribution data).
-
-### Google Ads
-See CLAUDE.md §Google Ads for full OAuth flow and field mappings. Key notes:
-
-**Developer token:** Two tiers: Basic Access (test accounts only, granted immediately) and Standard Access (production, 2-3 business days, requires live app). Apply from day one of development.
-
-**GAQL (Google Ads Query Language):** SQL-like. Do not use legacy AdWords API.
-
-**No hourly data:** Google Ads API does not provide hourly breakdown. `hour` is always NULL for Google rows.
-
-**GAQL endpoint:** `POST https://googleads.googleapis.com/v17/customers/{customerId}/googleAds:searchStream`
-Headers: `Authorization: Bearer {token}`, `developer-token: {GOOGLE_ADS_DEVELOPER_TOKEN}`
-
-**Token refresh:** Access tokens expire in 1 hour. Refresh transparently in `GoogleAdsClient` when within 5 minutes of expiry using the stored refresh token.
-
-### Google Search Console
-See CLAUDE.md §Google Search Console for full connection flow.
-
-**searchAnalytics endpoint:** `POST https://searchconsole.googleapis.com/webmasters/v3/sites/{encodedSiteUrl}/searchAnalytics/query`
-Use URL-encoding for siteUrl (e.g. `https%3A%2F%2Fmystore.de%2F`).
-
-**Request body:**
-```json
-{
-  "startDate": "YYYY-MM-DD",
-  "endDate": "YYYY-MM-DD",
-  "dimensions": ["date"],         // or ["date","query"] or ["date","page"]
-  "rowLimit": 1000,
-  "dataState": "all"              // includes fresh unprocessed data
-}
-```
-
-Run every 6 hours. Query last 5 days on every run (2-3 day lag + 2 buffer days). Upsert on conflict.
-
-**Token refresh:** Same pattern as Google Ads. `RefreshOAuthTokenJob` also refreshes GSC daily at 05:00 UTC as safety net.
-
-**Timezone:** GSC doesn't report a timezone. Use linked store's timezone, or workspace.reporting_timezone if no store linked.
+| `app/Contracts/StoreConnector.php` | Interface for multi-platform support |
+| `app/Services/RevenueAttributionService.php` | UTM-attributed revenue query |
+| `app/Jobs/ComputeMetricBaselinesJob.php` | Rolling median + MAD per metric per weekday |
+| `app/Jobs/DetectAnomaliesJob.php` | Rule-based anomaly detection + correlateSignals() |
+| `app/Jobs/RunLighthouseCheckJob.php` | PSI API check per URL |
+| `app/Jobs/EvaluateUptimeJob.php` | Reads probe results, fires alerts when ≥2 probes confirm down |
+| `app/Http/Controllers/Api/UptimeProbeController.php` | API endpoints for external probe scripts (targets + report) |
+| `app/Jobs/ReconcileStoreOrdersJob.php` | Daily order reconciliation against Woo API |
+| `app/Jobs/SyncRecentRefundsJob.php` | Refund backfill, last 7 days |
+| `app/Jobs/RefreshHolidaysJob.php` | Global holiday table population via yasumi |
+| `app/Models/Holiday.php` | Global holiday reference model |
+| `app/Jobs/GenerateMonthlyReportJob.php` | PDF report generation |
+| `app/Jobs/CleanupPerformanceDataJob.php` | Uptime/lighthouse data retention |
+| `app/Services/PerformanceMonitoring/PsiClient.php` | PSI API wrapper with quota guard |
+| `app/Http/Controllers/PerformanceController.php` | /performance page |
+| `app/Http/Controllers/WorkspaceOverviewController.php` | Multi-workspace overview |
+| `app/Models/StoreUrl.php` | Monitored URL model |
+| `app/Models/LighthouseSnapshot.php` | PSI result model |
+| `app/Models/UptimeCheck.php` | Uptime result model |
+| `app/Models/UptimeDailySummary.php` | Aggregated uptime model |
+| `app/Models/DailySnapshotProduct.php` | Normalized product snapshot |
+| `app/Models/MetricBaseline.php` | Precomputed baseline model |
+| `app/Models/WorkspaceEvent.php` | Promotion/event context model |
+| `app/Models/OrderCoupon.php` | Normalized coupon model |
+| `app/Models/Refund.php` | Individual refund event model |
+| `app/Models/ProductCategory.php` | Category model |
+| `app/Models/GoogleAdsKeyword.php` | Keyword-level Google Ads data |
+| `app/Models/NotificationPreference.php` | Per-workspace-per-user alert config |
+| `app/Models/CouponExclusion.php` | Auto-promotion exclusion list |
+| `app/Models/StoreWebhook.php` | Webhook audit model |
+| `resources/js/Pages/Performance/Index.tsx` | Performance page |
+| `resources/js/Pages/Workspaces/Overview.tsx` | Multi-workspace overview |
+| `SILENT_MODE_GRADUATION.md` | Go/no-go criteria for enabling live alerts |
 
 ---
 
-## Background Jobs
+## Verification
 
-### Why withoutOverlapping(10)
-When two app servers both run the scheduler, scheduled tasks fire twice. `withoutOverlapping(10)` uses an atomic Redis cache lock. Argument is TTL in minutes (10 is sensible). Default TTL is 1440 minutes — a crashed job blocks re-runs for 24 hours. Always pass explicit TTL.
+### Phase 0
+- `php artisan migrate:fresh --seed` — all tables with correct columns/indexes/constraints
+- Product webhook: trigger product.updated in Woo, confirm stock_status/categories updated
+- Holidays: dispatch RefreshHolidaysJob for country=DE, confirm German holidays in holidays table (NOT workspace_events)
+- Coupons: create order with coupon via Woo, confirm order_coupons row created
+- Refunds: issue partial refund in Woo, dispatch SyncRecentRefundsJob, confirm refunds row + orders.refund_amount updated
+- GSC: dispatch sync, confirm device + country columns populated on gsc_daily_stats/gsc_queries/gsc_pages
+- Ad insights: dispatch sync, confirm frequency, conversions, search_impression_share, raw_insights populated
+- order_items: no direct queries bypass tenant isolation (all go through Order relationship)
 
-### FX Rate Job Notes
-- `UpdateFxRatesJob` stores `date` from the API response (not today — on weekends the API returns Friday's rates)
-- Historical import pre-populates FX rates before processing orders (DB-first: only fetches dates not already cached)
-
-### Job Failure Philosophy
-Increment `consecutive_sync_failures` once per dispatch (after all retry attempts), not once per retry. A job that fails on all 3 retry attempts counts as 1 failure, not 3. Status→'error' at 3 consecutive dispatch failures.
-
-`RecomputeReportingCurrencyJob`: use `chunk(1000)` on all queries. A workspace with 500k orders would OOM without chunking.
-
-### PurgeDeletedWorkspaceJob
-Runs weekly (Sunday 05:00 UTC). Finds all workspaces where `deleted_at < now() - 30 days` and hard-deletes them in a single DB transaction. All related data (stores, orders, snapshots, ad accounts, etc.) cascades via FK `ON DELETE CASCADE`. Logs each purge. Timeout: 300s, 3 tries.
-
-Workspace model uses Laravel's `SoftDeletes` trait — all Eloquent queries automatically exclude soft-deleted rows. `PurgeDeletedWorkspaceJob` uses `onlyTrashed()` to find candidates. Sync jobs and `SetActiveWorkspace` get the filtering for free via the trait.
-
----
-
-## Workspace Deletion
-
-### Why require subscription cancellation before deletion
-If we cancelled the subscription automatically on workspace deletion, the owner could initiate deletion by mistake and lose their subscription status immediately. Requiring manual cancellation first ensures the decision is deliberate and two-step. It also means any refund/cancellation dispute is handled through Stripe's normal flow before data is touched.
-
-### Why soft-delete + 30-day recovery window
-Standard SaaS practice. Accidental deletion is common. 30 days is long enough for a user to notice and recover, but short enough that it doesn't create indefinite limbo for orphaned data. During the soft-delete window: all syncs paused, workspace hidden from UI, data fully intact. Owner can self-serve restore via a link in the confirmation email.
-
-### Deletion blocked conditions
-1. Outstanding unpaid invoices in Stripe (`status = 'open'`)
-2. Active subscription (must cancel through `/settings/billing` first)
-
-### Deletion flow
-1. Owner confirms deletion → `deleted_at = now()`
-2. Confirmation email sent with restore link (valid 30 days)
-3. Owner can restore at any time within 30 days → `deleted_at = null`
-4. After 30 days: `PurgeDeletedWorkspaceJob` hard-deletes with full cascade
-
----
-
-## Data Retention Rationale
-| Data | Retention | Rationale |
-|---|---|---|
-| Orders, items | Forever | Historical revenue is the product's core value |
-| Products | Forever | Reference metadata for top products display |
-| Ad insights | Forever | Long-term ROAS trends |
-| Daily snapshots | Forever | Historical charts and trend analysis |
-| Hourly snapshots | Forever | Customers expect hourly drill-down for any historical date (e.g. Black Friday last year). ~8,760 rows/store/year — negligible storage cost. |
-| FX rates | Forever | Historical order conversion needs historical rates |
-| GSC daily stats | Forever | Long-term SEO trend lines |
-| GSC queries/pages | Forever | GSC API only goes back ~16 months; once stored, data is irreplaceable. Customers expect to see trends from day one of connection. Storage cost is negligible. |
-| AI summaries | Forever | Users value looking back at AI analysis for any historical period. Tiny rows (~1 KB each). |
-| Alerts | Forever | Historical failure patterns are useful for diagnostics and trend analysis. Small data. |
-| Sync logs | 90 days | Pure operational — no customer value after debugging window |
-| Webhook logs | 30 days | Contains customer PII in payload (GDPR minimization). Short-term debugging and replay only. |
-
----
-
-## Phased Roadmap
-
-### MVP (Build Now)
-- Multi-workspace: Owner / Admin / Member roles, workspace switcher
-- WooCommerce integration (API key auth)
-- Facebook Ads + Google Ads (OAuth)
-- Google Search Console (OAuth)
-- Dashboard: revenue, orders, ROAS, AOV, items/order, marketing spend %
-- Date range picker with comparison mode, hourly/daily/weekly granularity
-- Store detail: metrics, top products, country breakdown
-- Per-country view: revenue, orders, top products (cross-store and per-store)
-- Advertising section: per-platform and blended view
-- AI daily summary card (no email)
-- Currency normalisation with FX rates
-- Historical import with resumability, progress tracking, time estimates
-- Alert feed (sync failures, token expiry)
-- Hybrid billing: flat tiers + revenue % model
-- 14-day free trial, no card
-- Super admin panel
+### Phase 1
+- Dashboard: all four conditional rows render correctly based on integration flags
+- Dashboard: absent sections collapse, show connection prompts
+- Performance: dispatch RunLighthouseCheckJob, confirm lighthouse_snapshots row with scores
+- Billing: non-ecom workspace on ad-spend tier calculates correctly (2% rate)
+- Billing: trial expiry freezes sync jobs
+- Billing: Scale tier auto-assigned when GMV >€25k
+- Reconciliation: inject missing order, run ReconcileStoreOrdersJob, confirm backfilled
+- Event overlay: create workspace_event + holiday marker both visible on dashboard chart
+- Workspace events: manual promotion creation, verify chart overlay renders
+- Data accuracy help links present at: Platform ROAS tooltip, GSC cards (lag note), Woo order counts (webhook/reconciliation timing)
+- Admin impersonation: admin can view any workspace's dashboard without being a member
+- Trial reactivation: freeze workspace, wait, pay — confirm catch-up sync fills the data gap
+- Empty-state dashboard: new workspace shows raw metrics + baseline progress indicator, not blank cards
 
 ### Phase 2
-- **Shopify integration** — full spec in this document §Shopify above
-- **Data export** — CSV export for orders, revenue, ad spend by date range. Available on dashboard, store overview, and advertising pages. Queued job for large exports (>10k rows), direct download for small ones.
-- Uptime monitoring (ping stores every 5 minutes from second-region VPS)
-- TTFB + Core Web Vitals via PageSpeed Insights API
-- SSL expiry monitoring
-- Site audit crawler: 404s, redirect chains, missing meta, hreflang errors
-- Ad ↔ page correlation: match ads.destination_url to site audit data
-- First-party tracking pixel (Hyros-style session tracking and ad attribution)
-- Abandoned cart detection (requires pixel)
-- Email digest (AI summary by email, opt-in)
-- Google Postmaster Tools (domain reputation for email health)
-- SMS credit system (consumption-based billing add-on)
-- Two-VPS migration with Deployer + Ansible
-
-### Phase 3
-- Email marketing flows (abandoned cart, welcome, post-purchase sequences)
-- Mobile app (REST API at `/api/v1/` alongside Inertia routes)
-- White-label for agencies
-- Predictive analytics / AI budget recommendations
-- Customer cohort analysis + LTV reporting
-- TikTok Ads, Pinterest Ads
-- Inventory alerts (low stock, slow movers)
-- Ahrefs / Semrush API passthrough (users bring own key)
-- Health score per store (composite metric)
-- Custom user-defined alert rules
-
-**Do not build any Phase 2 or Phase 3 feature without explicit instruction.**
-
----
-
-## Security Model
-
-1. **Never store secrets in plaintext.** `Crypt::encryptString()` / `Crypt::decryptString()`. All credential columns end in `_encrypted`.
-2. **Never return decrypted credentials to frontend.** Masked strings only (e.g. `"****4f2a"`).
-3. **Never log raw tokens or customer emails.** Log IDs and status codes only.
-4. **Verify every webhook signature** before processing. Invalid → 401 + log.
-5. **Verify workspace ownership** via Policies before every data operation.
-6. **Customer emails:** SHA-256(lowercase(trim(email))). Never store raw. GDPR.
-7. **Rate limits:** auth `throttle:10,1`; webhook `throttle:100,1` keyed by store_id.
-8. **Parameterised queries only.** No raw SQL interpolation.
-9. **CSRF:** automatic for Inertia. Exclude `'stripe/*'` from VerifyCsrfToken.
-10. **Stripe webhooks:** `Cashier::routes()` in routes/web.php; STRIPE_WEBHOOK_SECRET auto-verified.
-11. **Invitation roles:** Admins invite Member or Admin only (WorkspaceInvitationPolicy).
-12. **Billing is Owner-only:** BillingPolicy; Admins/Members get 403.
-13. **Update last_login_at** on every successful login.
-
----
-
-## Code Conventions
-
-### PHP
-- `declare(strict_types=1)` in every file
-- PHP 8.5: match, readonly, constructor promotion, enums, named args
-- Controllers: validate → Action → Inertia::render() only
-- Actions: single `handle()` method. Business logic lives here.
-- Models: relationships, scopes, accessors only
-- All tests: `Http::fake()`, `Queue::fake()`, `Event::fake()` — never hit real APIs
-- `DB::transaction()` for multi-table writes
-- `upsert()` for all synced data — never `insert()`
-- `select()` specific columns, never `SELECT *`
-
-### TypeScript / React
-- TypeScript everywhere
-- Functional components + hooks only
-- `React.memo` on MetricCard and chart wrappers; `useMemo` for chart data transforms
-- Tailwind only, no inline styles
-- Shared utils: `formatCurrency(amount, currency, compact?)`, `formatNumber(value, compact?)`, `formatPercent(value)`, `formatDate(date, granularity, timezone)`
-
-### Database
-- Every migration has `down()`
-- Indexes in same migration as table
-- Tests MUST use PostgreSQL:
-  ```xml
-  <!-- phpunit.xml inside <php> -->
-  <env name="DB_CONNECTION" value="pgsql"/>
-  <env name="DB_DATABASE" value="metrify_test"/>
-  ```
-  Run `createdb metrify_test` before first test run.
-
----
-
-## Environment Variables
-
-```env
-APP_NAME=Metrify
-APP_ENV=production
-APP_DEBUG=false
-APP_KEY=                          # php artisan key:generate
-APP_URL=https://app.metrify.io
-APP_TIMEZONE=UTC
-APP_LOCALE=en
-APP_FALLBACK_LOCALE=en
-APP_FAKER_LOCALE=en_US
-
-DB_CONNECTION=pgsql
-DB_HOST=127.0.0.1
-DB_PORT=5432
-DB_DATABASE=metrify
-DB_USERNAME=metrify
-DB_PASSWORD=
-
-REDIS_HOST=127.0.0.1
-REDIS_PASSWORD=null
-REDIS_PORT=6379
-
-QUEUE_CONNECTION=redis
-SESSION_DRIVER=redis
-SESSION_LIFETIME=480              # 8 hours — users leave dashboards open all day
-CACHE_STORE=redis
-
-MAIL_MAILER=smtp
-MAIL_HOST=
-MAIL_PORT=587
-MAIL_USERNAME=
-MAIL_PASSWORD=
-MAIL_ENCRYPTION=tls
-MAIL_FROM_ADDRESS=hello@metrify.io
-MAIL_FROM_NAME=Metrify
-
-STRIPE_KEY=
-STRIPE_SECRET=
-STRIPE_WEBHOOK_SECRET=
-CASHIER_CURRENCY=EUR
-STRIPE_PRICE_STARTER_M=
-STRIPE_PRICE_STARTER_A=
-STRIPE_PRICE_GROWTH_M=
-STRIPE_PRICE_GROWTH_A=
-STRIPE_PRICE_SCALE_M=
-STRIPE_PRICE_SCALE_A=
-STRIPE_PRICE_PERCENTAGE=          # metered, €0.01/unit (= 1% of revenue in €)
-
-FACEBOOK_APP_ID=
-FACEBOOK_APP_SECRET=
-FACEBOOK_REDIRECT_URI=
-
-GOOGLE_CLIENT_ID=
-GOOGLE_CLIENT_SECRET=
-GOOGLE_REDIRECT_URI=              # handles both Google Ads and GSC callbacks via state JSON type field
-GOOGLE_ADS_DEVELOPER_TOKEN=       # Standard Access required for production — apply early
-
-ANTHROPIC_API_KEY=                # separate from your Claude Code subscription key
-ANTHROPIC_MODEL=claude-sonnet-4-6
-
-FX_BASE_CURRENCY=EUR
-FRANKFURTER_API_URL=https://api.frankfurter.dev/v2  # no key, no quotas, self-hostable
-```
-
----
-
-## Common Commands
-
-```bash
-php artisan test
-php artisan test --filter=Roas
-php artisan migrate
-php artisan migrate:fresh --seed          # dev only
-php artisan horizon
-php artisan horizon:status
-php artisan horizon:terminate
-php artisan schedule:work
-php artisan tinker
-php artisan make:job SomeName
-php artisan make:policy SomeName
-php artisan make:request SomeName
-npm run dev
-npm run build
-createdb metrify_test                      # one-time PostgreSQL test database
-stripe listen --forward-to localhost/stripe/webhook
-```
-
----
-
-## Claude MUST Always
-- Apply `WorkspaceScope` to every workspace-scoped model
-- In every queue job: call `app(WorkspaceContext::class)->set($this->workspaceId)` at start of `handle()`
-- Set `trial_ends_at = now() + 14 days` on every new `workspaces` row
-- Encrypt credentials before storing; decrypt only at point of use
-- Verify webhook signatures before processing
-- `upsert()` for all synced external data
-- `withoutOverlapping(10)` on all scheduled tasks (explicit TTL)
-- `down()` for every migration
-- Business logic in Action classes only
-- Queue jobs for all external HTTP calls
-- Tests for all calculation logic, permission boundaries, and queue jobs
-- `declare(strict_types=1)` in every PHP file
-- Reuse shared components — never duplicate MetricCard, DateRangePicker, chart wrappers
-- Update `users.last_login_at` on every successful login
-- Filter `ad_insights` by a single `level` value
-- Reset `consecutive_sync_failures = 0` on success; `status='active'` only if was `'error'`
-
-## Claude MUST Never
-- Store secrets in plaintext
-- Return decrypted credentials in Inertia props or API responses
-- Make synchronous HTTP requests in the request cycle
-- Query workspace data without workspace scope active
-- Put business logic in controllers or models
-- Commit `dd()`, `dump()`, `var_dump()`, `console.log()`
-- Use `SELECT *` in performance-sensitive queries
-- Build Phase 2 or Phase 3 features without explicit instruction
-- Add Redux, Zustand, or global state management
-- Duplicate chart or metric card code
-- SUM `ad_insights.spend_in_reporting_currency` across multiple `level` values
-- Call Frankfurter API from `FxRateService` — it reads `fx_rates` DB only
-- Hardcode the Frankfurter API URL — use `env('FRANKFURTER_API_URL')`
-- Store raw customer email addresses — SHA-256 hash after normalizing
-- Swallow exceptions silently
-- Return hardcoded/placeholder/fake data — show error state
-- Treat NULL `total_in_reporting_currency` as 0
-- Produce code that hides a silent failure
+- Baselines: dispatch ComputeMetricBaselinesJob with 6+ weeks of test data, confirm metric_baselines rows
+- Anomaly detection: seed 35% revenue drop vs baseline, dispatch DetectAnomaliesJob, confirm Alert with source='rule' and is_silent=true
+- Alert deduplication: dispatch twice on same condition, confirm only one Alert
+- Holiday suppression: anomaly on a holiday date is suppressed (checks holidays table by workspace.country)
+- Uptime: external probe POSTs to /api/uptime/report (10-min intervals), confirm uptime_checks row. EvaluateUptimeJob fires alert after 2 consecutive downs from ≥2 probes (~20 min)
+- AI alerts: dispatch GenerateAiSummaryJob, confirm AI-sourced alerts in Insights feed
+- Correlation: seed multi-signal anomaly (revenue drop + GSC drop), confirm composite narrative
+- Revenue impact: confirm estimated_impact_low/high populated on alert, shown as range in UI
+- CTR gaps: seed GSC query with high impressions + low CTR, confirm appears in SEO page
+- Checkout health: configure test product, run check against working store (pass) and broken URL (alert)
+- Silent mode graduation: review silent alerts, confirm ≥70% TP rate before flipping default

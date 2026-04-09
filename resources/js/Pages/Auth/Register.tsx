@@ -6,12 +6,13 @@ import GuestLayout from '@/Layouts/GuestLayout';
 import { Head, Link, useForm } from '@inertiajs/react';
 import { FormEventHandler } from 'react';
 
-export default function Register() {
+export default function Register({ invitation_token }: { invitation_token?: string }) {
     const { data, setData, post, processing, errors, reset } = useForm({
         name: '',
         email: '',
         password: '',
         password_confirmation: '',
+        invitation_token: invitation_token ?? '',
     });
 
     const submit: FormEventHandler = (e) => {
@@ -25,6 +26,12 @@ export default function Register() {
     return (
         <GuestLayout>
             <Head title="Register" />
+
+            {invitation_token && (
+                <div className="mb-4 rounded-md bg-indigo-50 p-3 text-sm text-indigo-700">
+                    You were invited to join a workspace. Create an account to accept.
+                </div>
+            )}
 
             <form onSubmit={submit}>
                 <div>
@@ -102,6 +109,9 @@ export default function Register() {
                         className="mt-2"
                     />
                 </div>
+
+                {/* Hidden — carries invitation token through to the controller */}
+                <input type="hidden" name="invitation_token" value={data.invitation_token} />
 
                 <div className="mt-4 flex items-center justify-end">
                     <Link

@@ -18,9 +18,21 @@ return [
     |
     */
 
-    'key' => env('STRIPE_KEY'),
+    'key' => env('VITE_STRIPE_KEY'),
 
     'secret' => env('STRIPE_SECRET'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Cashier Model
+    |--------------------------------------------------------------------------
+    |
+    | Billing is attached to Workspaces, not Users. This overrides Cashier's
+    | default billable model.
+    |
+    */
+
+    'model' => App\Models\Workspace::class,
 
     /*
     |--------------------------------------------------------------------------

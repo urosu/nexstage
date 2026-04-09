@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 namespace App\Http\Controllers;
 
 use App\Http\Requests\ProfileUpdateRequest;
@@ -14,11 +16,23 @@ use Inertia\Response;
 class ProfileController extends Controller
 {
     /**
-     * Display the user's profile form.
+     * Display the user's profile form (Breeze default, AuthenticatedLayout).
      */
     public function edit(Request $request): Response
     {
         return Inertia::render('Profile/Edit', [
+            'mustVerifyEmail' => $request->user() instanceof MustVerifyEmail,
+            'status' => session('status'),
+        ]);
+    }
+
+    /**
+     * Display the profile settings page within the app shell (AppLayout).
+     * Mounted at /settings/profile in the settings route group.
+     */
+    public function settingsPage(Request $request): Response
+    {
+        return Inertia::render('Settings/Profile', [
             'mustVerifyEmail' => $request->user() instanceof MustVerifyEmail,
             'status' => session('status'),
         ]);
@@ -37,7 +51,7 @@ class ProfileController extends Controller
 
         $request->user()->save();
 
-        return Redirect::route('profile.edit');
+        return back()->with('status', 'profile-updated');
     }
 
     /**

@@ -120,11 +120,36 @@
 @layer base {
   * {
     @apply border-border outline-ring/50;
-    }
+  }
   body {
     @apply bg-background text-foreground;
-    }
+  }
   html {
     @apply font-sans;
-    }
+  }
+
+  /* Buttons */
+  button,
+  [role='button'],
+  [type='button'],
+  [type='submit'],
+  [type='reset'] {
+    @apply cursor-pointer select-none;
+  }
+  button:disabled,
+  [role='button'][aria-disabled='true'] {
+    @apply cursor-not-allowed;
+  }
+
+  /* Inputs, selects, textareas */
+  input:not([type='checkbox']):not([type='radio']):not([type='range']),
+  textarea,
+  select {
+    @apply px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400;
+  }
+  input:focus,
+  textarea:focus,
+  select:focus {
+    @apply outline-none ring-2 ring-indigo-500/40 border-indigo-500;
+  }
 }

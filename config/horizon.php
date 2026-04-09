@@ -197,34 +197,59 @@ return [
     */
 
     'defaults' => [
-        'supervisor-1' => [
+        'supervisor-critical' => [
             'connection' => 'redis',
-            'queue' => ['default'],
-            'balance' => 'auto',
-            'autoScalingStrategy' => 'time',
-            'maxProcesses' => 1,
-            'maxTime' => 0,
-            'maxJobs' => 0,
-            'memory' => 128,
-            'tries' => 1,
-            'timeout' => 60,
-            'nice' => 0,
+            'queue'      => ['critical'],
+            'balance'    => 'simple',
+            'processes'  => 3,
+            'tries'      => 5,
+            'timeout'    => 30,
+            'nice'       => 0,
+        ],
+        'supervisor-high' => [
+            'connection' => 'redis',
+            'queue'      => ['high'],
+            'balance'    => 'simple',
+            'processes'  => 2,
+            'tries'      => 3,
+            'timeout'    => 60,
+            'nice'       => 0,
+        ],
+        'supervisor-default' => [
+            'connection' => 'redis',
+            'queue'      => ['default'],
+            'balance'    => 'simple',
+            'processes'  => 4,
+            'tries'      => 3,
+            'timeout'    => 300,
+            'nice'       => 0,
+        ],
+        'supervisor-low' => [
+            'connection' => 'redis',
+            'queue'      => ['low'],
+            'balance'    => 'simple',
+            'processes'  => 2,
+            'tries'      => 3,
+            'timeout'    => 7200,
+            'nice'       => 0,
         ],
     ],
 
     'environments' => [
+        // Production: full process counts per spec.
         'production' => [
-            'supervisor-1' => [
-                'maxProcesses' => 10,
-                'balanceMaxShift' => 1,
-                'balanceCooldown' => 3,
-            ],
+            'supervisor-critical' => ['processes' => 3],
+            'supervisor-high'     => ['processes' => 2],
+            'supervisor-default'  => ['processes' => 4],
+            'supervisor-low'      => ['processes' => 2],
         ],
 
+        // Single Plesk server: reduce processes to stay within memory budget.
         'local' => [
-            'supervisor-1' => [
-                'maxProcesses' => 3,
-            ],
+            'supervisor-critical' => ['processes' => 1],
+            'supervisor-high'     => ['processes' => 1],
+            'supervisor-default'  => ['processes' => 2],
+            'supervisor-low'      => ['processes' => 1],
         ],
     ],
 
