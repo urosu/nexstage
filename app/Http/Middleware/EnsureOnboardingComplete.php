@@ -15,7 +15,8 @@ use Symfony\Component\HttpFoundation\Response;
  * Blocks access to content routes until onboarding is complete.
  *
  * Onboarding is considered complete when:
- *   1. The workspace has a store with historical_import_status = 'completed', OR
+ *   1. The workspace has a store that has completed an import at least once
+ *      (historical_import_status = 'completed' OR historical_import_completed_at is set), OR
  *   2. The workspace has no store but has ads or GSC connected (ads-only path).
  *
  * This mirrors the redirect-to-dashboard condition in OnboardingController::show().
@@ -35,10 +36,19 @@ class EnsureOnboardingComplete
             return $next($request);
         }
 
-        // Path 1: workspace has a store with a completed import.
+        // Path 1: workspace has a store that has completed an import at least once,
+        // is currently running one, or is queued to start one.
+        // During a re-import, historical_import_status resets to "pending" but
+        // historical_import_completed_at retains the timestamp from the previous
+        // successful import — so the user isn't kicked back to onboarding.
+        // "Continue to dashboard" during a first-time import also lands here;
+        // the dashboard renders with partial data while the import finishes.
         $hasCompletedStore = Store::withoutGlobalScopes()
             ->where('workspace_id', $workspaceId)
-            ->where('historical_import_status', 'completed')
+            ->where(fn ($q) => $q
+                ->whereIn('historical_import_status', ['completed', 'pending', 'running', 'failed'])
+                ->orWhereNotNull('historical_import_completed_at')
+            )
             ->exists();
 
         if ($hasCompletedStore) {

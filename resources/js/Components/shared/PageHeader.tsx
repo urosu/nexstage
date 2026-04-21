@@ -6,6 +6,7 @@ interface PageHeaderProps {
     action?: ReactNode;
 }
 
+/** Shared page header — title + optional subtitle + optional action slot. */
 export function PageHeader({ title, subtitle, action }: PageHeaderProps) {
     return (
         <div className="mb-6 flex items-start justify-between gap-4">
@@ -15,7 +16,11 @@ export function PageHeader({ title, subtitle, action }: PageHeaderProps) {
                     <p className="mt-0.5 text-sm text-zinc-600">{subtitle}</p>
                 )}
             </div>
-            {action && <div className="shrink-0">{action}</div>}
+            {action && (
+                <div className="flex shrink-0 items-center gap-3">
+                    {action}
+                </div>
+            )}
         </div>
     );
 }

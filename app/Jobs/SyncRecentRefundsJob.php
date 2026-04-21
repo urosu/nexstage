@@ -11,6 +11,7 @@ use App\Models\SyncLog;
 use App\Services\Integrations\WooCommerce\WooCommerceConnector;
 use App\Services\WorkspaceContext;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -24,7 +25,7 @@ use Illuminate\Support\Facades\Log;
  * Reads from:   WooCommerce REST API (orders modified in last 7 days → /orders/{id}/refunds)
  * Writes to:    refunds table (upsert), orders.refund_amount + orders.last_refunded_at (denormalized)
  *
- * Queue:   low (reconciliation jobs)
+ * Queue:   sync-store
  * Timeout: 120 s
  * Tries:   3
  * Backoff: [60, 300, 900] s
@@ -43,21 +44,27 @@ use Illuminate\Support\Facades\Log;
  * Related: app/Services/Integrations/WooCommerce/WooCommerceConnector.php (syncRefunds)
  * Related: app/Models/Refund.php
  */
-class SyncRecentRefundsJob implements ShouldQueue
+class SyncRecentRefundsJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 120;
-    public int $tries   = 3;
+    public int $timeout   = 120;
+    public int $tries     = 3;
+    public int $uniqueFor = 150;
 
     /** @var int[] */
     public array $backoff = [60, 300, 900];
+
+    public function uniqueId(): string
+    {
+        return (string) $this->storeId;
+    }
 
     public function __construct(
         private readonly int $storeId,
         private readonly int $workspaceId,
     ) {
-        $this->onQueue('low');
+        $this->onQueue('sync-store');
     }
 
     public function handle(): void
@@ -74,12 +81,13 @@ class SyncRecentRefundsJob implements ShouldQueue
             'workspace_id'      => $this->workspaceId,
             'syncable_type'     => Store::class,
             'syncable_id'       => $this->storeId,
-            'job_type'          => 'SyncRecentRefundsJob',
+            'job_type'          => self::class,
             'status'            => 'running',
             'records_processed' => 0,
             'started_at'        => now(),
-            'queue'             => 'low',
+            'queue'             => $this->queue,
             'attempt'           => $this->attempts(),
+            'timeout_seconds'   => $this->timeout,
         ]);
 
         try {

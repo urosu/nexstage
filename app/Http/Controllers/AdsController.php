@@ -7,6 +7,7 @@ namespace App\Http\Controllers;
 use App\Models\AdAccount;
 use App\Models\Workspace;
 use App\Services\WorkspaceContext;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Inertia\Inertia;
@@ -16,12 +17,17 @@ use Inertia\Response;
  * Ad-level performance page — shows individual ad insights.
  *
  * Triggered by: GET /campaigns/ads
- * Reads from:   ads, adsets, campaigns, ad_accounts, ad_insights (level='ad')
+ * Reads from:   ads, adsets, campaigns, ad_accounts, ad_insights (level='ad'), orders
  * Writes to:    nothing
  *
  * Query strategy: LEFT JOIN from ads (structure) to ad_insights (metrics).
  * This shows all ads — including those with zero spend in the period. See AdSetsController
  * for the rationale; the same applies here.
+ *
+ * Winners/Losers: server-side classification using the same three classifiers as
+ * CampaignsController (target / peer / period). The 'target' classifier uses
+ * workspace_target_roas as the threshold (no per-ad target column exists).
+ * Classification always uses real_roas, not platform_roas.
  *
  * Optional URL params:
  *   ?campaign_id=N  — drill-through from campaigns page
@@ -29,6 +35,8 @@ use Inertia\Response;
  *
  * Related: app/Http/Controllers/CampaignsController.php
  * Related: app/Http/Controllers/AdSetsController.php
+ *
+ * @see PLANNING.md section 15
  */
 class AdsController extends Controller
 {
@@ -52,14 +60,20 @@ class AdsController extends Controller
             'last_synced_at' => $a->last_synced_at,
         ])->values()->all();
 
+        $workspaceTargetRoas = $workspace->target_roas ? (float) $workspace->target_roas : null;
+
         if ($adAccounts->isEmpty()) {
             return Inertia::render('Campaigns/Ads', [
                 'has_ad_accounts'      => false,
                 'ad_accounts'          => [],
                 'ads'                  => [],
+                'ads_total_count'      => 0,
+                'active_classifier'    => $workspaceTargetRoas !== null ? 'target' : 'peer',
+                'wl_has_target'        => $workspaceTargetRoas !== null,
+                'wl_peer_avg_roas'     => null,
                 'campaign_name'        => null,
                 'adset_name'           => null,
-                'workspace_target_roas' => $workspace->target_roas ? (float) $workspace->target_roas : null,
+                'workspace_target_roas' => $workspaceTargetRoas,
                 ...$params,
             ]);
         }
@@ -117,13 +131,19 @@ class AdsController extends Controller
             return $direction === 'asc' ? $cmp : -$cmp;
         });
 
+        $wl = $this->applyWinnersLosers($ads, $params, $workspace, $adAccountIds);
+
         return Inertia::render('Campaigns/Ads', [
             'has_ad_accounts'      => true,
             'ad_accounts'          => $adAccountList,
-            'ads'                  => $ads,
+            'ads'                  => $wl['ads'],
+            'ads_total_count'      => $wl['total_count'],
+            'active_classifier'    => $wl['active_classifier'],
+            'wl_has_target'        => $workspaceTargetRoas !== null,
+            'wl_peer_avg_roas'     => $wl['peer_avg_roas'],
             'campaign_name'        => $campaignName,
             'adset_name'           => $adsetName,
-            'workspace_target_roas' => $workspace->target_roas ? (float) $workspace->target_roas : null,
+            'workspace_target_roas' => $workspaceTargetRoas,
             ...$params,
         ]);
     }
@@ -131,7 +151,7 @@ class AdsController extends Controller
     // ─── Parameter validation ─────────────────────────────────────────────────
 
     /**
-     * @return array{from:string,to:string,platform:string,status:string,sort:string,direction:string,campaign_id:int|null,adset_id:int|null}
+     * @return array{from:string,to:string,platform:string,status:string,sort:string,direction:string,campaign_id:int|null,adset_id:int|null,view:string,filter:string,classifier:string|null}
      */
     private function validateParams(Request $request): array
     {
@@ -140,11 +160,13 @@ class AdsController extends Controller
             'to'          => ['sometimes', 'nullable', 'date_format:Y-m-d', 'after_or_equal:from'],
             'platform'    => ['sometimes', 'nullable', 'in:all,facebook,google'],
             'status'      => ['sometimes', 'nullable', 'in:all,active,paused'],
-            'sort'        => ['sometimes', 'nullable', 'in:spend,impressions,clicks,ctr,cpc,platform_roas'],
+            'sort'        => ['sometimes', 'nullable', 'in:spend,impressions,clicks,ctr,cpc,platform_roas,real_roas'],
             'direction'   => ['sometimes', 'nullable', 'in:asc,desc'],
             'campaign_id' => ['sometimes', 'nullable', 'integer', 'min:1'],
             'adset_id'    => ['sometimes', 'nullable', 'integer', 'min:1'],
             'view'        => ['sometimes', 'nullable', 'in:table,quadrant'],
+            'filter'      => ['sometimes', 'nullable', 'in:all,winners,losers'],
+            'classifier'  => ['sometimes', 'nullable', 'in:target,peer,period'],
         ]);
 
         return [
@@ -157,7 +179,135 @@ class AdsController extends Controller
             'campaign_id' => isset($v['campaign_id']) ? (int) $v['campaign_id'] : null,
             'adset_id'    => isset($v['adset_id'])    ? (int) $v['adset_id']    : null,
             'view'        => $v['view']         ?? 'table',
+            'filter'      => $v['filter']       ?? 'all',
+            'classifier'  => $v['classifier']   ?? null,
         ];
+    }
+
+    // ─── Winners / Losers classifier ─────────────────────────────────────────
+
+    /**
+     * Tags each ad with wl_tag ('winner'|'loser'|null), then filters based on $params['filter'].
+     *
+     * Three classifiers per PLANNING.md section 15 — mirrors CampaignsController::applyWinnersLosers():
+     *   target — above/below workspace target_roas (no per-ad target column exists)
+     *   peer   — above/below the workspace-average real_roas across all ads with spend
+     *   period — improved/declined vs the same-length period immediately before $params['from']
+     *
+     * Default: 'target' when workspace has target_roas set, 'peer' otherwise.
+     * Dormant ads (spend = 0) always receive wl_tag = null.
+     * Classification always uses real_roas (not platform_roas).
+     *
+     * @param  array<int, array<string, mixed>>  $ads
+     * @param  array<string, mixed>              $params
+     * @param  Workspace                         $workspace
+     * @param  int[]                             $adAccountIds
+     * @return array{ads:array<int,array<string,mixed>>,total_count:int,active_classifier:string,peer_avg_roas:float|null}
+     */
+    private function applyWinnersLosers(
+        array $ads,
+        array $params,
+        Workspace $workspace,
+        array $adAccountIds,
+    ): array {
+        $workspaceTargetRoas = $workspace->target_roas !== null ? (float) $workspace->target_roas : null;
+        $hasTarget           = $workspaceTargetRoas !== null;
+
+        $effectiveClassifier = $params['classifier']
+            ?? ($hasTarget ? 'target' : 'peer');
+
+        $adsWithRoas = array_filter(
+            $ads,
+            fn (array $a) => $a['real_roas'] !== null && $a['spend'] > 0,
+        );
+        $peerAvgRoas = count($adsWithRoas) > 0
+            ? array_sum(array_column($adsWithRoas, 'real_roas')) / count($adsWithRoas)
+            : null;
+
+        $prevAttrMap  = [];
+        $prevSpendMap = [];
+        if ($effectiveClassifier === 'period') {
+            $periodDays  = Carbon::parse($params['from'])->diffInDays(Carbon::parse($params['to'])) + 1;
+            $prevTo      = Carbon::parse($params['from'])->subDay()->toDateString();
+            $prevFrom    = Carbon::parse($prevTo)->subDays($periodDays - 1)->toDateString();
+            $utmPlatform = $params['platform'] === 'all' ? '' : $params['platform'];
+            $workspaceId = app(WorkspaceContext::class)->id();
+            $prevAttrMap  = $this->buildUtmAttributionMap($workspaceId, $prevFrom, $prevTo, $utmPlatform);
+            $prevSpendMap = $this->buildAdSpendMap($adAccountIds, $prevFrom, $prevTo);
+        }
+
+        $tagged = array_map(function (array $a) use (
+            $effectiveClassifier, $workspaceTargetRoas, $peerAvgRoas, $prevAttrMap, $prevSpendMap,
+        ): array {
+            if ($a['spend'] <= 0) {
+                return array_merge($a, ['wl_tag' => null]);
+            }
+
+            $tag = match ($effectiveClassifier) {
+                'target' => $this->wlTagByTarget($a, $workspaceTargetRoas),
+                'peer'   => $this->wlTagByPeer($a, $peerAvgRoas),
+                'period' => $this->wlTagByPeriod($a, $prevAttrMap, $prevSpendMap),
+                default  => null,
+            };
+
+            return array_merge($a, ['wl_tag' => $tag]);
+        }, $ads);
+
+        $totalCount = count($tagged);
+
+        if ($params['filter'] !== 'all') {
+            $filterTag = rtrim($params['filter'], 's');
+            $tagged    = array_values(
+                array_filter($tagged, fn (array $a) => $a['wl_tag'] === $filterTag),
+            );
+        }
+
+        return [
+            'ads'               => $tagged,
+            'total_count'       => $totalCount,
+            'active_classifier' => $effectiveClassifier,
+            'peer_avg_roas'     => $peerAvgRoas !== null ? round($peerAvgRoas, 2) : null,
+        ];
+    }
+
+    /** Tag ad vs workspace target_roas. Null when no target exists. */
+    private function wlTagByTarget(array $ad, ?float $workspaceTargetRoas): ?string
+    {
+        if ($workspaceTargetRoas === null || $ad['real_roas'] === null) {
+            return null;
+        }
+        return $ad['real_roas'] >= $workspaceTargetRoas ? 'winner' : 'loser';
+    }
+
+    /** Tag ad vs workspace-average real_roas across all ads with spend. */
+    private function wlTagByPeer(array $ad, ?float $peerAvgRoas): ?string
+    {
+        if ($peerAvgRoas === null || $ad['real_roas'] === null) {
+            return null;
+        }
+        return $ad['real_roas'] >= $peerAvgRoas ? 'winner' : 'loser';
+    }
+
+    /**
+     * Tag ad by comparing current-period real_roas to previous-period real_roas.
+     * Winner = improved (higher ROAS). Null when previous period has no data.
+     */
+    private function wlTagByPeriod(array $ad, array $prevAttrMap, array $prevSpendMap): ?string
+    {
+        $prevSpend = $prevSpendMap[$ad['id']] ?? 0.0;
+        $prevAttr  = $prevAttrMap[$ad['id']]  ?? null;
+
+        if ($prevAttr === null || $prevSpend <= 0) {
+            return null;
+        }
+
+        $prevRoas = (float) $prevAttr['revenue'] / $prevSpend;
+
+        if ($ad['real_roas'] === null) {
+            return null;
+        }
+
+        return $ad['real_roas'] > $prevRoas ? 'winner' : 'loser';
     }
 
     // ─── UTM attribution ──────────────────────────────────────────────────────
@@ -210,6 +360,44 @@ class AdsController extends Controller
                 'revenue' => (float) $row->attributed_revenue,
                 'orders'  => (int)   $row->attributed_orders,
             ];
+        }
+
+        return $map;
+    }
+
+    /**
+     * Build a map of ad internal ID → spend for a given date range.
+     * Used by the 'period' W/L classifier to compute previous-period real_roas.
+     *
+     * @param  int[]  $adAccountIds
+     * @return array<int, float>  ad_id => spend
+     */
+    private function buildAdSpendMap(array $adAccountIds, string $from, string $to): array
+    {
+        if (empty($adAccountIds)) {
+            return [];
+        }
+
+        $workspaceId  = app(WorkspaceContext::class)->id();
+        $placeholders = implode(',', array_fill(0, count($adAccountIds), '?'));
+
+        $rows = DB::select("
+            SELECT
+                a.id                                                  AS ad_id,
+                COALESCE(SUM(ai.spend_in_reporting_currency), 0)      AS total_spend
+            FROM ad_insights ai
+            JOIN ads a ON a.id = ai.ad_id
+            WHERE ai.workspace_id = ?
+              AND ai.ad_account_id IN ({$placeholders})
+              AND ai.level = 'ad'
+              AND ai.hour IS NULL
+              AND ai.date BETWEEN ? AND ?
+            GROUP BY a.id
+        ", array_merge([$workspaceId], $adAccountIds, [$from, $to]));
+
+        $map = [];
+        foreach ($rows as $row) {
+            $map[(int) $row->ad_id] = (float) $row->total_spend;
         }
 
         return $map;

@@ -85,7 +85,7 @@ class WorkspaceEventsController extends Controller
         return back()->with('success', 'Event created.');
     }
 
-    public function update(Request $request, int $eventId): RedirectResponse
+    public function update(Request $request, string $eventId): RedirectResponse
     {
         $workspace = Workspace::findOrFail(app(WorkspaceContext::class)->id());
 

@@ -41,9 +41,23 @@ class CleanupOldSyncLogsJob implements ShouldQueue
     public function handle(): void
     {
         $cutoff  = now()->subDays(90)->toDateTimeString();
-        $deleted = DB::table('sync_logs')
-            ->where('created_at', '<', $cutoff)
-            ->delete();
+        $deleted = 0;
+
+        // Chunked delete: Postgres holds a lock for the duration of each DELETE statement.
+        // Processing in batches of 10 000 keeps individual lock windows short and prevents
+        // WAL bloat on large tables.
+        do {
+            $count = DB::table('sync_logs')
+                ->whereIn('id', static function ($sub) use ($cutoff): void {
+                    $sub->select('id')
+                        ->from('sync_logs')
+                        ->where('created_at', '<', $cutoff)
+                        ->orderBy('id')
+                        ->limit(10000);
+                })
+                ->delete();
+            $deleted += $count;
+        } while ($count > 0);
 
         Log::info('CleanupOldSyncLogsJob: completed', ['deleted' => $deleted]);
     }

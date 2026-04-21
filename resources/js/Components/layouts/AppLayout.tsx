@@ -1,4 +1,5 @@
 import { Link, router, usePage } from '@inertiajs/react';
+import { DataFreshness } from '@/Components/shared/DataFreshness';
 import { Toaster } from '@/Components/ui/sonner';
 import { toast } from 'sonner';
 import { AlertBanner } from '@/Components/shared/AlertBanner';
@@ -29,11 +30,18 @@ import {
     FileCode2,
     Globe,
     Gauge,
+    GitCompareArrows,
+    Layers,
     Settings,
     Tag,
     Trophy,
+    Activity,
+    ShieldAlert,
+    GitBranch,
+    Plus,
+    DollarSign,
 } from 'lucide-react';
-import { PropsWithChildren, ReactNode, useEffect, useState } from 'react';
+import { ReactNode, useEffect, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { wurl } from '@/lib/workspace-url';
 import { PageProps, Store as StoreType, Workspace } from '@/types';
@@ -208,6 +216,14 @@ function WorkspaceSwitcher({ workspace, workspaces }: { workspace: Workspace | u
                                 {w.id === workspace.id && <Check className="h-3.5 w-3.5 text-primary" />}
                             </button>
                         ))}
+                        <div className="my-1 border-t border-zinc-100" />
+                        <button
+                            onClick={() => { setOpen(false); router.post(route('workspaces.create')); }}
+                            className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700 transition-colors"
+                        >
+                            <Plus className="h-3.5 w-3.5" />
+                            New workspace
+                        </button>
                     </div>
                 </>
             )}
@@ -232,6 +248,10 @@ function UserMenu({
 }) {
     const [open, setOpen] = useState(false);
     const w = (path: string) => wurl(workspaceSlug, path);
+    const isOwnerOrAdmin = isSuperAdmin || workspaceRole === 'owner' || workspaceRole === 'admin';
+    const isOwner        = isSuperAdmin || workspaceRole === 'owner';
+
+    const close = () => setOpen(false);
 
     return (
         <div className="relative">
@@ -245,46 +265,87 @@ function UserMenu({
 
             {open && (
                 <>
-                    <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-                    <div className="absolute right-0 top-full z-20 mt-1 w-52 rounded-lg border border-zinc-200 bg-white py-1 shadow-lg">
+                    <div className="fixed inset-0 z-10" onClick={close} />
+                    <div className="absolute right-0 top-full z-20 mt-1 w-56 rounded-lg border border-zinc-200 bg-white py-1 shadow-lg">
+                        {/* User info */}
                         <div className="border-b border-zinc-100 px-3 py-2">
                             <div className="text-sm font-medium text-zinc-900 truncate">{name}</div>
                             <div className="text-xs text-zinc-400 truncate">{email}</div>
                         </div>
-                        <Link href={w('/settings/profile')} onClick={() => setOpen(false)} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
+
+                        {/* Personal */}
+                        <Link href={w('/settings/profile')} onClick={close} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
                             <User className="h-4 w-4 text-zinc-400" /> Profile
                         </Link>
-                        {(isSuperAdmin || workspaceRole === 'owner') && (
-                            <Link href={w('/settings/billing')} onClick={() => setOpen(false)} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
-                                <CreditCard className="h-4 w-4 text-zinc-400" /> Billing
-                            </Link>
+                        <Link href={w('/settings/notifications')} onClick={close} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
+                            <Bell className="h-4 w-4 text-zinc-400" /> Notifications
+                        </Link>
+
+                        {/* Workspace settings (owner / admin) */}
+                        {isOwnerOrAdmin && (
+                            <div className="border-t border-zinc-100 mt-1 pt-1">
+                                <div className="px-3 py-1 text-[10px] font-semibold text-zinc-400 uppercase tracking-widest">Workspace</div>
+                                <Link href={w('/settings/workspace')} onClick={close} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
+                                    <Settings className="h-4 w-4 text-zinc-400" /> Settings
+                                </Link>
+                                <Link href={w('/settings/integrations')} onClick={close} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
+                                    <Puzzle className="h-4 w-4 text-zinc-400" /> Integrations
+                                </Link>
+                                <Link href={w('/settings/team')} onClick={close} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
+                                    <Users className="h-4 w-4 text-zinc-400" /> Team
+                                </Link>
+                                <Link href={w('/settings/events')} onClick={close} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
+                                    <CalendarDays className="h-4 w-4 text-zinc-400" /> Events
+                                </Link>
+                                {isOwner && (
+                                    <Link href={w('/settings/billing')} onClick={close} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
+                                        <CreditCard className="h-4 w-4 text-zinc-400" /> Billing
+                                    </Link>
+                                )}
+                            </div>
                         )}
+
+                        {/* Admin + Dev (super_admin only) */}
                         {isSuperAdmin && (
-                            <>
-                                <div className="border-t border-zinc-100 mt-1 pt-1">
-                                    <div className="px-3 py-1.5 text-xs font-medium text-zinc-400 uppercase tracking-wide">
-                                        Admin
-                                    </div>
-                                    <Link href="/admin/overview" onClick={() => setOpen(false)} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
-                                        <ShieldCheck className="h-4 w-4 text-zinc-400" /> Overview
-                                    </Link>
-                                    <Link href="/admin/workspaces" onClick={() => setOpen(false)} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
-                                        <Building2 className="h-4 w-4 text-zinc-400" /> Workspaces
-                                    </Link>
-                                    <Link href="/admin/users" onClick={() => setOpen(false)} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
-                                        <Users className="h-4 w-4 text-zinc-400" /> Users
-                                    </Link>
-                                    <Link href="/admin/logs" onClick={() => setOpen(false)} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
-                                        <ScrollText className="h-4 w-4 text-zinc-400" /> Logs
-                                    </Link>
-                                    <Link href="/admin/queue" onClick={() => setOpen(false)} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
-                                        <ListOrdered className="h-4 w-4 text-zinc-400" /> Queue
-                                    </Link>
-                                </div>
-                            </>
+                            <div className="border-t border-zinc-100 mt-1 pt-1">
+                                <div className="px-3 py-1 text-[10px] font-semibold text-zinc-400 uppercase tracking-widest">Admin</div>
+                                <Link href="/admin/overview" onClick={close} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
+                                    <ShieldCheck className="h-4 w-4 text-zinc-400" /> Overview
+                                </Link>
+                                <Link href="/admin/workspaces" onClick={close} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
+                                    <Building2 className="h-4 w-4 text-zinc-400" /> Workspaces
+                                </Link>
+                                <Link href="/admin/users" onClick={close} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
+                                    <Users className="h-4 w-4 text-zinc-400" /> Users
+                                </Link>
+                                <Link href="/admin/logs" onClick={close} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
+                                    <ScrollText className="h-4 w-4 text-zinc-400" /> Logs
+                                </Link>
+                                <Link href="/admin/queue" onClick={close} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
+                                    <ListOrdered className="h-4 w-4 text-zinc-400" /> Queue
+                                </Link>
+                                <Link href="/admin/system-health" onClick={close} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
+                                    <Activity className="h-4 w-4 text-zinc-400" /> System Health
+                                </Link>
+                                <Link href="/admin/silent-alerts" onClick={close} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
+                                    <ShieldAlert className="h-4 w-4 text-zinc-400" /> Silent Alerts
+                                </Link>
+                                <Link href="/admin/channel-mappings" onClick={close} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
+                                    <GitBranch className="h-4 w-4 text-zinc-400" /> Channels
+                                </Link>
+                                <div className="px-3 py-1 mt-1 text-[10px] font-semibold text-zinc-400 uppercase tracking-widest">Dev</div>
+                                <Link href="/admin/dev/snippets" onClick={close} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
+                                    <FileCode2 className="h-4 w-4 text-zinc-400" /> Snippets
+                                </Link>
+                                <Link href="/admin/dev/debug" onClick={close} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
+                                    <Bug className="h-4 w-4 text-zinc-400" /> Debug
+                                </Link>
+                            </div>
                         )}
+
+                        {/* Logout */}
                         <div className="border-t border-zinc-100 mt-1 pt-1">
-                            <Link href="/logout" method="post" as="button" onClick={() => setOpen(false)} className="flex w-full items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors">
+                            <Link href="/logout" method="post" as="button" onClick={close} className="flex w-full items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors">
                                 <LogOut className="h-4 w-4" /> Log out
                             </Link>
                         </div>
@@ -313,116 +374,6 @@ function AlertBell({ count, workspaceSlug }: { count: number; workspaceSlug: str
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 
-function buildSettingsItems(
-    role: 'owner' | 'admin' | 'member' | null | undefined,
-    isSuperAdmin: boolean,
-    w: (path: string) => string,
-): FlatNavItem[] {
-    const isOwnerOrAdmin = isSuperAdmin || role === 'owner' || role === 'admin';
-    const isOwner        = isSuperAdmin || role === 'owner';
-
-    return [
-        { label: 'Profile',        href: w('/settings/profile'),        icon: User },
-        { label: 'Notifications',  href: w('/settings/notifications'),  icon: Bell },
-        ...(isOwnerOrAdmin ? [
-            { label: 'Workspace',    href: w('/settings/workspace'),    icon: Settings },
-            { label: 'Events',       href: w('/settings/events'),       icon: CalendarDays },
-            { label: 'Integrations', href: w('/settings/integrations'), icon: Puzzle },
-            { label: 'Team',         href: w('/settings/team'),         icon: Users },
-        ] : []),
-        ...(isOwner ? [
-            { label: 'Billing', href: w('/settings/billing'), icon: CreditCard },
-        ] : []),
-    ];
-}
-
-// ─── Winners / Losers accordion ───────────────────────────────────────────────
-
-/**
- * Inline sidebar accordion that deep-links to per-page winner/loser filter views.
- * See: PLANNING.md "Winners/Losers" — Phase 1.4 chips, sidebar shortcut in Phase 1.3
- */
-function WinnersLosersAccordion({ workspaceSlug, onClick }: { workspaceSlug: string | undefined; onClick?: () => void }) {
-    const pathname = typeof window !== 'undefined' ? window.location.pathname : '';
-    const w = (path: string) => wurl(workspaceSlug, path);
-
-    // Active when any of the winner/loser deep-link destinations is current
-    const isActive = [w('/campaigns'), w('/analytics/products'), w('/stores')].some(
-        (p) => pathname === p || pathname.startsWith(p + '/'),
-    );
-
-    const [open, setOpen] = useState(isActive);
-
-    // Carry the current page's date range to the target page so the user doesn't
-    // lose their selected period when clicking a sidebar winner/loser link.
-    const dateQuery = (() => {
-        if (typeof window === 'undefined') return '';
-        const p = new URLSearchParams(window.location.search);
-        const parts: string[] = [];
-        if (p.get('from')) parts.push(`from=${p.get('from')}`);
-        if (p.get('to'))   parts.push(`to=${p.get('to')}`);
-        return parts.length ? '&' + parts.join('&') : '';
-    })();
-
-    const items: { label: string; href: string; filter: string }[] = [
-        { label: 'Campaigns — Winners', href: w('/campaigns'),          filter: 'winners' },
-        { label: 'Campaigns — Losers',  href: w('/campaigns'),          filter: 'losers'  },
-        { label: 'Products — Winners',  href: w('/analytics/products'), filter: 'winners' },
-        { label: 'Products — Losers',   href: w('/analytics/products'), filter: 'losers'  },
-        { label: 'Stores — Winners',    href: w('/stores'),             filter: 'winners' },
-        { label: 'Stores — Losers',     href: w('/stores'),             filter: 'losers'  },
-    ];
-
-    return (
-        <div>
-            <button
-                onClick={() => setOpen((v) => !v)}
-                className={cn(
-                    'flex w-full items-center gap-2.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors',
-                    isActive
-                        ? 'text-primary'
-                        : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900',
-                )}
-            >
-                <Trophy className={cn('h-4 w-4 shrink-0', isActive ? 'text-primary' : 'text-zinc-400')} />
-                <span className="flex-1 text-left">Winners / Losers</span>
-                <ChevronRight
-                    className={cn(
-                        'h-3.5 w-3.5 shrink-0 transition-transform',
-                        isActive ? 'text-primary/60' : 'text-zinc-300',
-                        open && 'rotate-90',
-                    )}
-                />
-            </button>
-
-            {open && (
-                <div className="mt-0.5 space-y-0.5">
-                    {items.map((item) => {
-                        const href = `${item.href}?filter=${item.filter}${dateQuery}`;
-                        const active = pathname === item.href && typeof window !== 'undefined'
-                            && new URLSearchParams(window.location.search).get('filter') === item.filter;
-                        return (
-                            <Link
-                                key={`${item.href}-${item.filter}`}
-                                href={href}
-                                onClick={onClick}
-                                className={cn(
-                                    'flex items-center gap-2.5 rounded-lg pl-8 pr-3 py-1.5 text-sm font-medium transition-colors',
-                                    active
-                                        ? 'bg-primary/10 text-primary'
-                                        : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900',
-                                )}
-                            >
-                                {item.label}
-                            </Link>
-                        );
-                    })}
-                </div>
-            )}
-        </div>
-    );
-}
-
 // Section header rendered between nav groups
 function SectionLabel({ label }: { label: string }) {
     return (
@@ -436,15 +387,11 @@ function Sidebar({
     workspace,
     workspaces,
     stores,
-    isSuperAdmin,
-    workspaceRole,
     onClose,
 }: {
     workspace: Workspace | undefined;
     workspaces: Workspace[] | undefined;
     stores: StoreType[];
-    isSuperAdmin: boolean;
-    workspaceRole: 'owner' | 'admin' | 'member' | null | undefined;
     onClose?: () => void;
 }) {
     const pathname = typeof window !== 'undefined' ? window.location.pathname : '';
@@ -494,9 +441,17 @@ function Sidebar({
                     onClick={onClose}
                 />
 
-                {/* Channels */}
-                <SectionLabel label="Channels" />
+                {/* Performance */}
+                <SectionLabel label="Performance" />
                 <div className="space-y-0.5">
+                    <SidebarLink
+                        item={{
+                            label: 'Acquisition',
+                            href: w('/acquisition'),
+                            icon: Layers,
+                        }}
+                        onClick={onClose}
+                    />
                     <SidebarLink
                         item={{
                             label: 'Paid Ads',
@@ -526,13 +481,14 @@ function Sidebar({
                     />
                 </div>
 
-                {/* Analytics */}
-                <SectionLabel label="Analytics" />
+                {/* Reports */}
+                <SectionLabel label="Reports" />
                 <div className="space-y-0.5">
-                    <SidebarLink item={{ label: 'Daily Breakdown', href: w('/analytics/daily'),    icon: Globe }}    onClick={onClose} />
-                    <SidebarLink item={{ label: 'By Product',      href: w('/analytics/products'), icon: Search }}   onClick={onClose} />
+                    <SidebarLink item={{ label: 'Discrepancy',     href: w('/analytics/discrepancy'), icon: GitCompareArrows }} onClick={onClose} />
+                    <SidebarLink item={{ label: 'Daily Breakdown', href: w('/analytics/daily'),    icon: CalendarDays }} onClick={onClose} />
                     <SidebarLink item={{ label: 'By Country',      href: w('/countries'),           icon: Globe }}    onClick={onClose} />
-                    <WinnersLosersAccordion workspaceSlug={slug} onClick={onClose} />
+                    <SidebarLink item={{ label: 'By Product',      href: w('/analytics/products'), icon: Search }}   onClick={onClose} />
+                    <SidebarLink item={{ label: 'Winners & Losers', href: w('/analytics/winners'), icon: Trophy }} onClick={onClose} />
                 </div>
 
                 {/* Stores */}
@@ -559,42 +515,14 @@ function Sidebar({
                         <SectionLabel label="Tools" />
                         <div className="space-y-0.5">
                             <SidebarLink item={{ label: 'Tag Generator', href: w('/manage/tag-generator'), icon: Tag }} onClick={onClose} />
+                            <SidebarLink item={{ label: 'Naming Convention', href: w('/manage/naming-convention'), icon: FileCode2 }} onClick={onClose} />
+                            <SidebarLink item={{ label: 'Channel Mappings', href: w('/manage/channel-mappings'), icon: GitBranch }} onClick={onClose} />
+                            <SidebarLink item={{ label: 'Product Costs', href: w('/manage/product-costs'), icon: DollarSign }} onClick={onClose} />
+                            <SidebarLink item={{ label: 'Holidays', href: w('/holidays'), icon: CalendarDays }} onClick={onClose} />
                         </div>
                     </>
                 )}
 
-                {/* Settings */}
-                <SectionLabel label="Settings" />
-                <div className="space-y-0.5">
-                    {buildSettingsItems(workspaceRole, isSuperAdmin, w).map((item) => (
-                        <SidebarLink key={item.href} item={item} onClick={onClose} />
-                    ))}
-                </div>
-
-                {/* Admin */}
-                {isSuperAdmin && (
-                    <>
-                        <SectionLabel label="Admin" />
-                        <div className="space-y-0.5">
-                            <SidebarLink item={{ label: 'Overview',   href: '/admin/overview',   icon: ShieldCheck }} onClick={onClose} />
-                            <SidebarLink item={{ label: 'Workspaces', href: '/admin/workspaces', icon: Building2 }}   onClick={onClose} />
-                            <SidebarLink item={{ label: 'Users',      href: '/admin/users',      icon: Users }}       onClick={onClose} />
-                            <SidebarLink item={{ label: 'Logs',       href: '/admin/logs',       icon: ScrollText }}  onClick={onClose} />
-                            <SidebarLink item={{ label: 'Queue',      href: '/admin/queue',      icon: ListOrdered }} onClick={onClose} />
-                        </div>
-                    </>
-                )}
-
-                {/* Dev */}
-                {isSuperAdmin && (
-                    <>
-                        <SectionLabel label="Dev" />
-                        <div className="space-y-0.5">
-                            <SidebarLink item={{ label: 'Snippets', href: '/admin/dev/snippets', icon: FileCode2 }} onClick={onClose} />
-                            <SidebarLink item={{ label: 'Debug',    href: '/admin/dev/debug',    icon: Bug }}       onClick={onClose} />
-                        </div>
-                    </>
-                )}
             </nav>
 
             {/* Workspace switcher */}
@@ -683,8 +611,6 @@ export default function AppLayout({ children, topBarRight, dateRangePicker }: Ap
                     workspace={workspace}
                     workspaces={workspaces}
                     stores={stores ?? []}
-                    isSuperAdmin={isSuperAdmin}
-                    workspaceRole={workspace_role}
                     onClose={() => setSidebarOpen(false)}
                 />
             </div>
@@ -719,7 +645,8 @@ export default function AppLayout({ children, topBarRight, dateRangePicker }: Ap
                     <div className="flex flex-1 items-center gap-2 min-w-0">
                         {dateRangePicker}
                     </div>
-                    <div className="flex shrink-0 items-center gap-1">
+                    <div className="flex shrink-0 items-center gap-3">
+                        <DataFreshness />
                         {topBarRight}
                         <AlertBell count={unread_alerts_count ?? 0} workspaceSlug={slug} />
                         <UserMenu

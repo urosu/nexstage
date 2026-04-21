@@ -19,6 +19,13 @@ return new class extends Migration
             $table->foreignId('workspace_id')->constrained('workspaces')->cascadeOnDelete();
             $table->string('platform_webhook_id', 255);
             $table->string('topic', 255);
+
+            // Updated by the webhook controller on every successfully processed delivery.
+            // PollStoreOrdersJob reads this to decide whether to poll: if a webhook arrived
+            // recently, polling is skipped. NULL = no confirmed delivery ever — always poll.
+            // @see PLANNING.md section 5, 21
+            $table->timestamp('last_successful_delivery_at')->nullable();
+
             $table->timestamp('created_at')->nullable();
             $table->timestamp('deleted_at')->nullable();
 

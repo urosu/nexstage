@@ -34,6 +34,12 @@ class LighthouseSnapshot extends Model
         'inp_ms',
         'ttfb_ms',
         'tbt_ms',
+        'crux_source',
+        'crux_lcp_p75_ms',
+        'crux_inp_p75_ms',
+        'crux_cls_p75',
+        'crux_fcp_p75_ms',
+        'crux_ttfb_p75_ms',
         'raw_response',
         'raw_response_api_version',
         'created_at',
@@ -42,9 +48,10 @@ class LighthouseSnapshot extends Model
     protected function casts(): array
     {
         return [
-            'checked_at' => 'datetime',
-            'created_at' => 'datetime',
-            'cls_score' => 'decimal:4',
+            'checked_at'   => 'datetime',
+            'created_at'   => 'datetime',
+            'cls_score'    => 'decimal:4',
+            'crux_cls_p75' => 'decimal:4',
             'raw_response' => 'array',
         ];
     }

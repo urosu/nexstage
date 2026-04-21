@@ -47,6 +47,14 @@ return new class extends Migration
 
             $table->timestamp('trial_ends_at')->nullable();
             $table->string('billing_plan', 50)->nullable();
+
+            // Catch-all for structured UI config that doesn't warrant dedicated columns:
+            // naming convention shape, dashboard preferences, dismissed banner timestamps.
+            // Access only via WorkspaceSettings value object — never raw array access.
+            // Queries must never filter on JSONB subkeys; promote to a column if needed.
+            // @see PLANNING.md section 5.6
+            $table->jsonb('workspace_settings')->nullable();
+
             $table->string('stripe_id')->nullable();
             $table->string('pm_type')->nullable();
             $table->string('pm_last_four', 4)->nullable();

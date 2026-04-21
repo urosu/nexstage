@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Models;
 
+use App\ValueObjects\WorkspaceSettings;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -47,6 +48,7 @@ class Workspace extends Model
         'utm_coverage_status',
         'utm_coverage_checked_at',
         'utm_unrecognized_sources',
+        'workspace_settings',
     ];
 
     protected function casts(): array
@@ -66,6 +68,7 @@ class Workspace extends Model
             'utm_coverage_pct' => 'decimal:2',
             'utm_coverage_checked_at' => 'datetime',
             'utm_unrecognized_sources' => 'array',
+            'workspace_settings'       => WorkspaceSettings::class,
         ];
     }
 

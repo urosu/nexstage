@@ -14,6 +14,7 @@ use App\Services\RevenueAttributionService;
 use App\Services\WorkspaceContext;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -65,6 +66,10 @@ class SeoController extends Controller
                 'top_queries'           => [],
                 'top_pages'             => [],
                 'summary'               => null,
+                'organic_revenue'       => null,
+                'organic_orders'        => 0,
+                'organic_cvr'           => null,
+                'organic_aov'           => null,
                 'total_revenue'         => $totalRevenue,
                 'unattributed_revenue'  => $unattributedRevenue,
                 'from'                  => $from,
@@ -215,6 +220,33 @@ class SeoController extends Controller
             $workspaceId, $workspace->has_store, $from, $to,
         );
 
+        // ── Organic revenue from attribution data ────────────────────────────
+        // Orders where channel_type = 'organic_search' in the attribution pipeline.
+        // @see PLANNING.md section 12.5 "/seo — refinement"
+        $organicRow = DB::selectOne("
+            SELECT
+                COALESCE(SUM(total_in_reporting_currency), 0) AS organic_revenue,
+                COUNT(id) AS organic_orders
+            FROM orders
+            WHERE workspace_id = ?
+              AND status IN ('completed', 'processing')
+              AND total_in_reporting_currency IS NOT NULL
+              AND attribution_last_touch->>'channel_type' = 'organic_search'
+              AND occurred_at BETWEEN ? AND ?
+        ", [$workspaceId, $from . ' 00:00:00', $to . ' 23:59:59']);
+
+        $organicRevenue = (float) ($organicRow->organic_revenue ?? 0);
+        $organicOrders  = (int) ($organicRow->organic_orders ?? 0);
+
+        // Estimated organic revenue per query/page: clicks × CVR × AOV for organic orders.
+        // Displayed as a range estimate.
+        $organicCvr = ($summary && $summary['clicks'] > 0 && $organicOrders > 0)
+            ? $organicOrders / (int) $summary['clicks']
+            : null;
+        $organicAov = $organicOrders > 0
+            ? $organicRevenue / $organicOrders
+            : null;
+
         return Inertia::render('Seo/Index', [
             'properties'           => $properties,
             'selected_property_ids'=> array_values($requestedIds),
@@ -222,6 +254,10 @@ class SeoController extends Controller
             'top_queries'          => $topQueries,
             'top_pages'            => $topPages,
             'summary'              => $summary,
+            'organic_revenue'      => $organicRevenue > 0 ? round($organicRevenue, 2) : null,
+            'organic_orders'       => $organicOrders,
+            'organic_cvr'          => $organicCvr !== null ? round($organicCvr, 6) : null,
+            'organic_aov'          => $organicAov !== null ? round($organicAov, 2) : null,
             'total_revenue'        => $totalRevenue,
             'unattributed_revenue' => $unattributedRevenue,
             'from'                 => $from,

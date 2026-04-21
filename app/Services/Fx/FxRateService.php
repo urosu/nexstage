@@ -87,18 +87,18 @@ class FxRateService
 
         // Case 2: order is already EUR
         if ($orderCurrency === 'EUR') {
-            return $amount * $this->getRate($reportingCurrency, $date);
+            return round($amount * $this->getRate($reportingCurrency, $date), 4);
         }
 
         // Case 3: reporting currency is EUR
         if ($reportingCurrency === 'EUR') {
-            return $amount / $this->getRate($orderCurrency, $date);
+            return round($amount / $this->getRate($orderCurrency, $date), 4);
         }
 
         // Case 4: cross-rate via EUR
         $rateToReporting = $this->getRate($reportingCurrency, $date);
         $rateToOrder     = $this->getRate($orderCurrency, $date);
 
-        return $amount * ($rateToReporting / $rateToOrder);
+        return round($amount * ($rateToReporting / $rateToOrder), 4);
     }
 }

@@ -15,6 +15,7 @@ use App\Services\Ai\AiSummaryService;
 use App\Services\WorkspaceContext;
 use Carbon\Carbon;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -41,12 +42,13 @@ use Illuminate\Support\Facades\Log;
  * Dispatched daily between 01:00–02:00 UTC, staggered by (workspace_id % 60)
  * minutes to spread load across the window.
  */
-class GenerateAiSummaryJob implements ShouldQueue
+class GenerateAiSummaryJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 120;
-    public int $tries   = 2;
+    public int $timeout   = 120;
+    public int $tries     = 2;
+    public int $uniqueFor = 150;
 
     /** @var array<int, int> */
     public array $backoff = [60, 300];
@@ -55,6 +57,11 @@ class GenerateAiSummaryJob implements ShouldQueue
         private readonly int $workspaceId,
     ) {
         $this->onQueue('low');
+    }
+
+    public function uniqueId(): string
+    {
+        return (string) $this->workspaceId;
     }
 
     public function handle(AiSummaryService $aiService): void
@@ -119,7 +126,7 @@ class GenerateAiSummaryJob implements ShouldQueue
         // Skip: summary for today already exists
         $alreadyGenerated = AiSummary::withoutGlobalScopes()
             ->where('workspace_id', $this->workspaceId)
-            ->whereDate('date', $today)
+            ->where('date', $today)
             ->exists();
 
         if ($alreadyGenerated) {
@@ -139,15 +146,41 @@ class GenerateAiSummaryJob implements ShouldQueue
 
         $dates = [$yesterday, $dayBefore, $sameWeekdayLastWeek];
 
+        // Bulk-fetch all three dates in one query each instead of 2 queries × 3 dates.
+        $snapshots = DailySnapshot::withoutGlobalScopes()
+            ->where('workspace_id', $this->workspaceId)
+            ->whereIn('date', $dates)
+            ->selectRaw("
+                date::text AS date_key,
+                SUM(orders_count)      AS orders_count,
+                SUM(revenue)           AS revenue,
+                SUM(new_customers)     AS new_customers,
+                SUM(returning_customers) AS returning_customers,
+                CASE WHEN SUM(orders_count) > 0 THEN SUM(revenue) / SUM(orders_count) ELSE NULL END AS aov
+            ")
+            ->groupBy('date')
+            ->get()
+            ->keyBy('date_key');
+
+        $adSpends = AdInsight::withoutGlobalScopes()
+            ->where('workspace_id', $this->workspaceId)
+            ->where('level', 'campaign')
+            ->whereIn('date', $dates)
+            ->whereNull('hour')
+            ->selectRaw("date::text AS date_key, SUM(spend_in_reporting_currency) AS total_spend")
+            ->groupBy('date')
+            ->get()
+            ->keyBy('date_key');
+
         $payload = [
             'workspace' => [
                 'name'                => $workspace->name,
                 'reporting_currency'  => $workspace->reporting_currency,
             ],
             'days' => [
-                'yesterday'              => $this->buildDayMetrics($yesterday),
-                'day_before'             => $this->buildDayMetrics($dayBefore),
-                'same_weekday_last_week' => $this->buildDayMetrics($sameWeekdayLastWeek),
+                'yesterday'              => $this->buildDayMetrics($yesterday, $snapshots->get($yesterday), $adSpends->get($yesterday)),
+                'day_before'             => $this->buildDayMetrics($dayBefore, $snapshots->get($dayBefore), $adSpends->get($dayBefore)),
+                'same_weekday_last_week' => $this->buildDayMetrics($sameWeekdayLastWeek, $snapshots->get($sameWeekdayLastWeek), $adSpends->get($sameWeekdayLastWeek)),
             ],
         ];
 
@@ -158,10 +191,20 @@ class GenerateAiSummaryJob implements ShouldQueue
             ->exists();
 
         if ($hasGscProperty) {
+            $gscStats = GscDailyStat::withoutGlobalScopes()
+                ->where('workspace_id', $this->workspaceId)
+                ->whereIn('date', $dates)
+                ->where('device', 'all')
+                ->where('country', 'ZZ')
+                ->selectRaw("date::text AS date_key, SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(position) AS position")
+                ->groupBy('date')
+                ->get()
+                ->keyBy('date_key');
+
             $payload['gsc'] = [
-                'yesterday'              => $this->buildGscMetrics($yesterday),
-                'day_before'             => $this->buildGscMetrics($dayBefore),
-                'same_weekday_last_week' => $this->buildGscMetrics($sameWeekdayLastWeek),
+                'yesterday'              => $this->buildGscMetrics($yesterday, $gscStats->get($yesterday)),
+                'day_before'             => $this->buildGscMetrics($dayBefore, $gscStats->get($dayBefore)),
+                'same_weekday_last_week' => $this->buildGscMetrics($sameWeekdayLastWeek, $gscStats->get($sameWeekdayLastWeek)),
             ];
         }
 
@@ -200,34 +243,14 @@ class GenerateAiSummaryJob implements ShouldQueue
     // -------------------------------------------------------------------------
 
     /**
-     * Build per-day metrics from daily_snapshots + ad_insights (campaign level).
+     * Build per-day metrics from pre-fetched daily_snapshots + ad_insights rows.
      *
+     * @param  mixed $snapshot  Row from the bulk DailySnapshot query (or null)
+     * @param  mixed $adRow     Row from the bulk AdInsight query (or null)
      * @return array<string, mixed>
      */
-    private function buildDayMetrics(string $date): array
+    private function buildDayMetrics(string $date, mixed $snapshot, mixed $adRow): array
     {
-        // Aggregate daily_snapshots across all stores for this workspace
-        $snapshot = DailySnapshot::withoutGlobalScopes()
-            ->where('workspace_id', $this->workspaceId)
-            ->whereDate('date', $date)
-            ->selectRaw('
-                SUM(orders_count) as orders_count,
-                SUM(revenue) as revenue,
-                SUM(new_customers) as new_customers,
-                SUM(returning_customers) as returning_customers,
-                CASE WHEN SUM(orders_count) > 0 THEN SUM(revenue) / SUM(orders_count) ELSE NULL END as aov
-            ')
-            ->first();
-
-        // Aggregate ad spend at campaign level for this workspace on this date
-        $adRow = AdInsight::withoutGlobalScopes()
-            ->where('workspace_id', $this->workspaceId)
-            ->where('level', 'campaign')
-            ->whereDate('date', $date)
-            ->whereNull('hour')
-            ->selectRaw('SUM(spend_in_reporting_currency) as total_spend')
-            ->first();
-
         $revenue  = $snapshot ? (float) ($snapshot->revenue ?? 0) : 0.0;
         $adSpend  = $adRow ? (float) ($adRow->total_spend ?? 0) : null;
 
@@ -249,26 +272,13 @@ class GenerateAiSummaryJob implements ShouldQueue
     }
 
     /**
-     * Build GSC metrics for a single date (aggregated across all properties).
+     * Build GSC metrics from a pre-fetched GscDailyStat row.
      *
+     * @param  mixed $row  Row from the bulk GscDailyStat query (or null)
      * @return array<string, mixed>|null  null when no data exists for the date
      */
-    private function buildGscMetrics(string $date): ?array
+    private function buildGscMetrics(string $date, mixed $row): ?array
     {
-        $row = GscDailyStat::withoutGlobalScopes()
-            ->where('workspace_id', $this->workspaceId)
-            ->whereDate('date', $date)
-            // Why: filter to aggregate rows only to avoid inflating clicks/impressions
-            // from per-device/country breakdown rows added in Phase 0 migration.
-            ->where('device', 'all')
-            ->where('country', 'ZZ')
-            ->selectRaw('
-                SUM(clicks) as clicks,
-                SUM(impressions) as impressions,
-                AVG(position) as position
-            ')
-            ->first();
-
         if ($row === null || ($row->clicks === null && $row->impressions === null)) {
             return null;
         }

@@ -75,16 +75,17 @@ class ReconcileStoreOrdersJob implements ShouldQueue
             'workspace_id'      => $this->workspaceId,
             'syncable_type'     => Store::class,
             'syncable_id'       => $this->storeId,
-            'job_type'          => 'ReconcileStoreOrdersJob',
+            'job_type'          => self::class,
             'status'            => 'running',
             'records_processed' => 0,
             'started_at'        => now(),
             'queue'             => 'low',
             'attempt'           => $this->attempts(),
+            'timeout_seconds'   => $this->timeout,
         ]);
 
         try {
-            [$backfilled, $updated, $wcCount] = $this->reconcile($store, $since);
+            [$backfilled, $updated, $deleted, $wcCount] = $this->reconcile($store, $since);
 
             $discrepancies = $backfilled + $updated;
 
@@ -100,11 +101,12 @@ class ReconcileStoreOrdersJob implements ShouldQueue
                 'wc_count'   => $wcCount,
                 'backfilled' => $backfilled,
                 'updated'    => $updated,
+                'deleted'    => $deleted,
             ]);
 
             // Alert if discrepancy rate >5% — suggests persistent webhook delivery issues.
             if ($wcCount > 0 && ($discrepancies / $wcCount) > 0.05) {
-                $this->createDiscrepancyAlert($discrepancies, $wcCount);
+                $this->createDiscrepancyAlert($discrepancies, $backfilled, $updated, $wcCount);
             }
 
             // Alert if no webhook activity in last 48 hours — store is running on polling only.
@@ -168,10 +170,15 @@ class ReconcileStoreOrdersJob implements ShouldQueue
     // -------------------------------------------------------------------------
 
     /**
-     * Fetch all WC orders for the last 7 days, compare to local DB, and backfill
-     * any missing or stale records.
+     * Fetch all WC orders for the last 7 days, compare to local DB, and:
+     *   - Backfill orders in WC but missing locally (webhook missed).
+     *   - Update orders whose WC date_modified is newer than our local updated_at.
+     *   - Hard-delete orders in our DB but absent from WC (test orders, user-deleted).
      *
-     * @return array{int, int, int}  [backfilled, updated, wcCount]
+     * Hard-deletes are scoped to the same 7-day window so we only touch orders that
+     * WC's response was authoritative for. Orders older than 7 days are never touched.
+     *
+     * @return array{int, int, int, int}  [backfilled, updated, deleted, wcCount]
      */
     private function reconcile(Store $store, Carbon $since): array
     {
@@ -179,21 +186,30 @@ class ReconcileStoreOrdersJob implements ShouldQueue
         $wcOrders  = $connector->fetchRawOrders($since);
         $wcCount   = count($wcOrders);
 
-        if ($wcCount === 0) {
-            return [0, 0, 0];
-        }
-
         $workspace    = Workspace::find($this->workspaceId);
         $reportingCcy = $workspace?->reporting_currency ?? 'EUR';
+
+        // Build a set of external IDs returned by WC for the window.
+        $wcExternalIds = [];
+        foreach ($wcOrders as $wcOrder) {
+            if (isset($wcOrder['id'])) {
+                $wcExternalIds[] = (string) $wcOrder['id'];
+            }
+        }
 
         // Build local lookup: external_id → updated_at Carbon instance.
         // Uses DB::table to bypass WorkspaceScope (we're already scoped via store_id).
         $localOrders = DB::table('orders')
             ->where('store_id', $store->id)
             ->where('workspace_id', $this->workspaceId)
-            ->where('ordered_at', '>=', $since)
+            ->where('occurred_at', '>=', $since)
             ->pluck('updated_at', 'external_id')
             ->map(fn (string $ts) => Carbon::parse($ts));
+
+        // If WC returned nothing and we have nothing locally, skip all work.
+        if ($wcCount === 0 && $localOrders->isEmpty()) {
+            return [0, 0, 0, 0];
+        }
 
         /** @var UpsertWooCommerceOrderAction $action */
         $action     = app(UpsertWooCommerceOrderAction::class);
@@ -207,17 +223,41 @@ class ReconcileStoreOrdersJob implements ShouldQueue
                 : null;
 
             if (! isset($localOrders[$externalId])) {
-                // Missing locally — backfill.
+                // In WC but missing locally — backfill.
                 $action->handle($store, $reportingCcy, $wcOrder);
                 $backfilled++;
             } elseif ($wcUpdatedAt !== null && $wcUpdatedAt->gt($localOrders[$externalId])) {
-                // Changed — WC side is newer, re-upsert.
+                // In both, but WC side is newer — re-upsert to pick up status/total changes.
                 $action->handle($store, $reportingCcy, $wcOrder);
                 $updated++;
             }
         }
 
-        return [$backfilled, $updated, $wcCount];
+        // Hard-delete orders in our DB that WC no longer returns for the same window.
+        // These were deleted on the store (test orders, merchant-cancelled).
+        // FK ON DELETE CASCADE removes order_items and order_coupons automatically.
+        $disappearedIds = $localOrders->keys()
+            ->diff($wcExternalIds)
+            ->values()
+            ->all();
+
+        $deleted = 0;
+
+        if (! empty($disappearedIds)) {
+            $deleted = DB::table('orders')
+                ->where('store_id', $store->id)
+                ->where('workspace_id', $this->workspaceId)
+                ->whereIn('external_id', $disappearedIds)
+                ->delete();
+
+            Log::info('ReconcileStoreOrdersJob: hard-deleted disappeared orders', [
+                'store_id'    => $this->storeId,
+                'deleted'     => $deleted,
+                'external_ids' => $disappearedIds,
+            ]);
+        }
+
+        return [$backfilled, $updated, $deleted, $wcCount];
     }
 
     /**
@@ -236,7 +276,7 @@ class ReconcileStoreOrdersJob implements ShouldQueue
     /**
      * Create a silent discrepancy alert (deduped to once per 24 hours).
      */
-    private function createDiscrepancyAlert(int $discrepancyCount, int $wcCount): void
+    private function createDiscrepancyAlert(int $discrepancyCount, int $backfilled, int $updated, int $wcCount): void
     {
         $alreadyAlerted = Alert::withoutGlobalScopes()
             ->where('workspace_id', $this->workspaceId)
@@ -260,6 +300,8 @@ class ReconcileStoreOrdersJob implements ShouldQueue
             'is_silent'    => true,
             'data'         => [
                 'discrepancy_count' => $discrepancyCount,
+                'backfilled'        => $backfilled,
+                'updated'           => $updated,
                 'wc_count'          => $wcCount,
                 'rate_pct'          => $ratePct,
             ],

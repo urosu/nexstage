@@ -62,8 +62,10 @@ class NewPasswordController extends Controller
             return redirect()->route('login')->with('status', __($status));
         }
 
+        // Use a generic message regardless of the specific failure (invalid token,
+        // user not found, etc.) to avoid revealing whether the email has an account.
         throw ValidationException::withMessages([
-            'email' => [trans($status)],
+            'email' => ['This password reset link is invalid or has expired. Please request a new one.'],
         ]);
     }
 }

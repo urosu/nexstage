@@ -28,37 +28,40 @@ use Inertia\Response;
 
 class StoreController extends Controller
 {
-    public function index(): Response
+    public function index(Request $request): Response
     {
         $workspaceId = app(WorkspaceContext::class)->id();
 
         $workspace = Workspace::withoutGlobalScopes()->find($workspaceId);
 
+        $validated = $request->validate([
+            'filter'     => ['sometimes', 'nullable', 'in:all,winners,losers'],
+            'classifier' => ['sometimes', 'nullable', 'in:target,peer,period'],
+        ]);
+        $filter     = $validated['filter']     ?? 'all';
+        $classifier = $validated['classifier'] ?? null;   // null → auto
+
         $stores = Store::withoutGlobalScopes()
             ->where('workspace_id', $workspaceId)
             ->select([
                 'id', 'slug', 'name', 'domain', 'type', 'status', 'currency', 'timezone',
-                'last_synced_at', 'historical_import_status',
+                'last_synced_at', 'historical_import_status', 'historical_import_progress',
             ])
             ->orderBy('created_at')
             ->get();
 
-        // Last 30-day revenue per store + workspace-level ad spend — used for Winners/Losers chips.
-        //
-        // Winners = stores whose marketing % (workspace ad spend / store revenue) is below the
-        // workspace target_marketing_pct. Losers = above target.
+        // Current 30-day window
+        $to      = now()->toDateString();
+        $from    = now()->subDays(29)->toDateString();
+
+        // Previous 30-day window (used by the 'period' classifier)
+        $prevTo   = now()->subDays(30)->toDateString();
+        $prevFrom = now()->subDays(59)->toDateString();
+
+        // Revenue per store — current and previous windows
         //
         // Why workspace-level ad spend: ad_insights has no store_id, so spend is attributable
-        // only at the workspace level. For single-store workspaces this is exact; for multi-store
-        // workspaces it is approximate (total spend divided by each store's individual revenue).
-        //
-        // Why gate on target_marketing_pct: "Winners/Losers" is meaningless without a benchmark.
-        // If the target is null, the chips are hidden entirely.
-        //
-        // See: PLANNING.md "Winners/Losers" — /stores chip
-        $to   = now()->toDateString();
-        $from = now()->subDays(29)->toDateString();
-
+        // only at the workspace level. See: PLANNING.md "Winners/Losers" — /stores chip
         $revenueRows = DB::table('daily_snapshots')
             ->where('workspace_id', $workspaceId)
             ->whereIn('store_id', $stores->pluck('id'))
@@ -68,8 +71,16 @@ class StoreController extends Controller
             ->get()
             ->keyBy('store_id');
 
-        // Workspace-level ad spend for the same 30-day window.
-        // Only campaign-level rows (no hour) to avoid double-counting.
+        $prevRevenueRows = DB::table('daily_snapshots')
+            ->where('workspace_id', $workspaceId)
+            ->whereIn('store_id', $stores->pluck('id'))
+            ->whereBetween('date', [$prevFrom, $prevTo])
+            ->select(['store_id', DB::raw('SUM(revenue) as revenue')])
+            ->groupBy('store_id')
+            ->get()
+            ->keyBy('store_id');
+
+        // Workspace-level ad spend — current and previous windows
         $workspaceAdSpend = (float) DB::table('ad_insights')
             ->where('workspace_id', $workspaceId)
             ->where('level', 'campaign')
@@ -77,15 +88,31 @@ class StoreController extends Controller
             ->whereBetween('date', [$from, $to])
             ->sum('spend_in_reporting_currency');
 
-        $storeList = $stores->map(function ($s) use ($revenueRows, $workspaceAdSpend) {
+        $prevWorkspaceAdSpend = (float) DB::table('ad_insights')
+            ->where('workspace_id', $workspaceId)
+            ->where('level', 'campaign')
+            ->whereNull('hour')
+            ->whereBetween('date', [$prevFrom, $prevTo])
+            ->sum('spend_in_reporting_currency');
+
+        $storeList = $stores->map(function ($s) use (
+            $revenueRows, $prevRevenueRows, $workspaceAdSpend, $prevWorkspaceAdSpend,
+        ) {
             $revenue30d = isset($revenueRows[$s->id])
                 ? (float) $revenueRows[$s->id]->revenue
                 : null;
 
-            // marketing_pct = workspace ad spend / this store's revenue × 100
-            // Null when revenue is zero or unknown (no snapshot data yet).
+            $prevRevenue30d = isset($prevRevenueRows[$s->id])
+                ? (float) $prevRevenueRows[$s->id]->revenue
+                : null;
+
+            // marketing_pct = workspace ad spend / this store's revenue × 100 (lower is better)
             $marketingPct = ($revenue30d !== null && $revenue30d > 0 && $workspaceAdSpend > 0)
                 ? round($workspaceAdSpend / $revenue30d * 100, 1)
+                : null;
+
+            $prevMarketingPct = ($prevRevenue30d !== null && $prevRevenue30d > 0 && $prevWorkspaceAdSpend > 0)
+                ? round($prevWorkspaceAdSpend / $prevRevenue30d * 100, 1)
                 : null;
 
             return [
@@ -97,24 +124,74 @@ class StoreController extends Controller
                 'status'                   => $s->status,
                 'currency'                 => $s->currency,
                 'timezone'                 => $s->timezone,
-                'last_synced_at'           => $s->last_synced_at?->toISOString(),
-                'historical_import_status' => $s->historical_import_status,
+                'last_synced_at'             => $s->last_synced_at?->toISOString(),
+                'historical_import_status'   => $s->historical_import_status,
+                'historical_import_progress' => $s->historical_import_progress !== null
+                    ? (int) $s->historical_import_progress
+                    : null,
                 'revenue_30d'              => $revenue30d,
                 'marketing_pct'            => $marketingPct,
+                'prev_marketing_pct'       => $prevMarketingPct,
             ];
-        });
+        })->all();
+
+        // ── Winners / Losers server-side classification ──────────────────────
+        // Metric for stores = marketing_pct (LOWER is better — below avg/target = winner).
+        // See: PLANNING.md section 15
+        $targetPct   = $workspace->target_marketing_pct !== null ? (float) $workspace->target_marketing_pct : null;
+        $hasTarget   = $targetPct !== null;
+
+        $effectiveClassifier = $classifier ?? ($hasTarget ? 'target' : 'peer');
+
+        // Peer average: workspace-avg marketing_pct across stores with data
+        $storesWithPct = array_filter($storeList, fn ($s) => $s['marketing_pct'] !== null);
+        $peerAvgPct    = count($storesWithPct) > 0
+            ? array_sum(array_column($storesWithPct, 'marketing_pct')) / count($storesWithPct)
+            : null;
+
+        $storeList = array_map(function (array $s) use ($effectiveClassifier, $targetPct, $peerAvgPct): array {
+            $tag = match ($effectiveClassifier) {
+                // Target: marketing_pct < target → efficient spend → winner
+                'target' => ($targetPct !== null && $s['marketing_pct'] !== null)
+                    ? ($s['marketing_pct'] < $targetPct ? 'winner' : 'loser')
+                    : null,
+                // Peer: marketing_pct < workspace avg → more efficient than average → winner
+                'peer' => ($peerAvgPct !== null && $s['marketing_pct'] !== null)
+                    ? ($s['marketing_pct'] < $peerAvgPct ? 'winner' : 'loser')
+                    : null,
+                // Period: marketing_pct decreased vs previous period → improved → winner
+                'period' => ($s['marketing_pct'] !== null && $s['prev_marketing_pct'] !== null)
+                    ? ($s['marketing_pct'] < $s['prev_marketing_pct'] ? 'winner' : 'loser')
+                    : null,
+                default => null,
+            };
+            return array_merge($s, ['wl_tag' => $tag]);
+        }, $storeList);
+
+        $totalStoreCount = count($storeList);
+
+        // URL param is plural ('winners'/'losers'); wl_tag is singular ('winner'/'loser').
+        if ($filter !== 'all') {
+            $filterTag = rtrim($filter, 's');
+            $storeList = array_values(
+                array_filter($storeList, fn (array $s) => $s['wl_tag'] === $filterTag),
+            );
+        }
 
         return Inertia::render('Stores/Index', [
-            'stores'                       => $storeList,
-            'workspace_target_marketing_pct' => $workspace->target_marketing_pct
-                ? (float) $workspace->target_marketing_pct
-                : null,
+            'stores'                         => $storeList,
+            'stores_total_count'             => $totalStoreCount,
+            'workspace_target_marketing_pct' => $targetPct,
+            'wl_has_target'                  => $hasTarget,
+            'active_classifier'              => $effectiveClassifier,
+            'filter'                         => $filter,
+            'classifier'                     => $classifier,
         ]);
     }
 
-    public function overview(Request $request, string $slug): Response
+    public function overview(Request $request, string $storeSlug): Response
     {
-        $store = $this->resolveStore($slug);
+        $store = $this->resolveStore($storeSlug);
 
         $validated   = $this->validateDateRange($request);
         $from        = $validated['from']         ?? now()->subDays(29)->toDateString();
@@ -140,9 +217,11 @@ class StoreController extends Controller
             ->whereNull('total_in_reporting_currency')
             ->exists();
 
+        // Scope-aware: show workspace-wide notes + notes scoped to this specific store.
         $notes = DailyNote::withoutGlobalScopes()
             ->where('workspace_id', $store->workspace_id)
             ->whereBetween('date', [$from, $to])
+            ->forAnnotationScope([$store->id])
             ->select(['date', 'note'])
             ->get()
             ->map(fn ($n) => ['date' => $n->date->toDateString(), 'note' => $n->note])
@@ -160,9 +239,9 @@ class StoreController extends Controller
         ]);
     }
 
-    public function products(Request $request, string $slug): Response
+    public function products(Request $request, string $storeSlug): Response
     {
-        $store = $this->resolveStore($slug);
+        $store = $this->resolveStore($storeSlug);
 
         $validated = $this->validateDateRange($request);
         $from      = $validated['from'] ?? now()->subDays(29)->toDateString();
@@ -220,7 +299,8 @@ class StoreController extends Controller
                     ELSE ROUND(((c.units - p.prev_units)::decimal / p.prev_units * 100)::numeric, 1)
                 END AS units_delta,
                 pr.stock_status,
-                pr.stock_quantity
+                pr.stock_quantity,
+                pr.image_url
             FROM current_p c
             CROSS JOIN earliest e
             LEFT JOIN prev_p p    ON p.product_external_id = c.product_external_id
@@ -241,15 +321,16 @@ class StoreController extends Controller
                 'units_delta'    => $p->units_delta   !== null ? (float) $p->units_delta   : null,
                 'stock_status'   => $p->stock_status,
                 'stock_quantity' => $p->stock_quantity !== null ? (int) $p->stock_quantity : null,
+                'image_url'      => $p->image_url,
             ], $products),
             'from' => $from,
             'to'   => $to,
         ]);
     }
 
-    public function countries(Request $request, string $slug): Response
+    public function countries(Request $request, string $storeSlug): Response
     {
-        $store = $this->resolveStore($slug);
+        $store = $this->resolveStore($storeSlug);
 
         $validated = $this->validateDateRange($request);
         $from      = $validated['from'] ?? now()->subDays(29)->toDateString();
@@ -289,9 +370,9 @@ class StoreController extends Controller
         ]);
     }
 
-    public function seo(Request $request, string $slug): Response
+    public function seo(Request $request, string $storeSlug): Response
     {
-        $store = $this->resolveStore($slug);
+        $store = $this->resolveStore($storeSlug);
 
         $validated = $this->validateDateRange($request);
         $from      = $validated['from'] ?? now()->subDays(29)->toDateString();
@@ -408,9 +489,9 @@ class StoreController extends Controller
         ]);
     }
 
-    public function performance(string $slug): Response
+    public function performance(string $storeSlug): Response
     {
-        $store = $this->resolveStore($slug);
+        $store = $this->resolveStore($storeSlug);
 
         $this->authorize('update', $store);
 
@@ -451,11 +532,14 @@ class StoreController extends Controller
         // GSC page suggestions (same as settings page)
         $workspace = Workspace::withoutGlobalScopes()->find($store->workspace_id);
         $gscSuggestions = [];
-        if ($workspace->has_gsc) {
-            $existingUrls   = array_column($urlData, 'url');
+        if ($workspace?->has_gsc) {
+            $existingUrls   = array_map(fn ($u) => rtrim($u, '/'), array_column($urlData, 'url'));
             $gscSuggestions = GscPage::withoutGlobalScopes()
                 ->where('workspace_id', $store->workspace_id)
-                ->when($existingUrls, fn ($q) => $q->whereNotIn('page', $existingUrls))
+                ->when($existingUrls, fn ($q) => $q->whereRaw(
+                    'RTRIM(page, \'/\') NOT IN (' . implode(',', array_fill(0, count($existingUrls), '?')) . ')',
+                    $existingUrls
+                ))
                 ->groupBy(['workspace_id', 'page'])
                 ->selectRaw('page, SUM(clicks) AS total_clicks')
                 ->orderByDesc('total_clicks')
@@ -471,9 +555,9 @@ class StoreController extends Controller
         ]);
     }
 
-    public function settings(string $slug): Response
+    public function settings(string $storeSlug): Response
     {
-        $store = $this->resolveStore($slug);
+        $store = $this->resolveStore($storeSlug);
 
         $this->authorize('update', $store);
 
@@ -482,9 +566,9 @@ class StoreController extends Controller
         ]);
     }
 
-    public function addUrl(Request $request, string $slug): RedirectResponse
+    public function addUrl(Request $request, string $storeSlug): RedirectResponse
     {
-        $store = $this->resolveStore($slug);
+        $store = $this->resolveStore($storeSlug);
 
         $this->authorize('update', $store);
 
@@ -526,9 +610,9 @@ class StoreController extends Controller
         return back()->with('success', 'URL added. Lighthouse check queued — results appear within a few minutes.');
     }
 
-    public function updateUrl(Request $request, string $slug, int $urlId): RedirectResponse
+    public function updateUrl(Request $request, string $storeSlug, int $urlId): RedirectResponse
     {
-        $store = $this->resolveStore($slug);
+        $store = $this->resolveStore($storeSlug);
 
         $this->authorize('update', $store);
 
@@ -555,9 +639,9 @@ class StoreController extends Controller
         return back()->with('success', 'URL updated.');
     }
 
-    public function checkUrlNow(Request $request, string $slug, int $urlId): RedirectResponse
+    public function checkUrlNow(Request $request, string $storeSlug, int $urlId): RedirectResponse
     {
-        $store = $this->resolveStore($slug);
+        $store = $this->resolveStore($storeSlug);
 
         $this->authorize('update', $store);
 
@@ -576,9 +660,9 @@ class StoreController extends Controller
         return back()->with('success', 'Lighthouse check queued — results appear within a few minutes.');
     }
 
-    public function removeUrl(Request $request, string $slug, int $urlId): RedirectResponse
+    public function removeUrl(Request $request, string $storeSlug, int $urlId): RedirectResponse
     {
-        $store = $this->resolveStore($slug);
+        $store = $this->resolveStore($storeSlug);
 
         $this->authorize('update', $store);
 
@@ -595,9 +679,9 @@ class StoreController extends Controller
         return back()->with('success', 'URL removed.');
     }
 
-    public function update(Request $request, string $slug): RedirectResponse
+    public function update(Request $request, string $storeSlug): RedirectResponse
     {
-        $store = $this->resolveStore($slug);
+        $store = $this->resolveStore($storeSlug);
 
         $this->authorize('update', $store);
 
@@ -610,12 +694,39 @@ class StoreController extends Controller
         $updated = (new UpdateStoreAction)->handle($store, $validated);
 
         // If the slug changed, redirect to the new URL so the browser stays in sync
-        if ($updated->slug !== $slug) {
-            return redirect()->route('stores.settings', $updated->slug)
+        if ($updated->slug !== $storeSlug) {
+            return redirect()->route('stores.settings', ['slug' => $updated->slug])
                 ->with('success', 'Store settings saved.');
         }
 
         return back()->with('success', 'Store settings saved.');
+    }
+
+    /**
+     * Save or clear the store's primary country code.
+     *
+     * Separate endpoint so the settings page can persist the country without
+     * revalidating the whole general settings form.
+     *
+     * @see PLANNING.md section 5.7
+     */
+    public function updateCountry(Request $request, string $storeSlug): RedirectResponse
+    {
+        $store = $this->resolveStore($storeSlug);
+
+        $this->authorize('update', $store);
+
+        $validated = $request->validate([
+            'primary_country_code' => ['nullable', 'string', 'size:2', 'alpha'],
+        ]);
+
+        $store->update([
+            'primary_country_code' => isset($validated['primary_country_code']) && $validated['primary_country_code'] !== ''
+                ? strtoupper($validated['primary_country_code'])
+                : null,
+        ]);
+
+        return back()->with('success', 'Primary country updated.');
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -722,14 +833,16 @@ class StoreController extends Controller
     private function storeProps(Store $store): array
     {
         return [
-            'id'       => $store->id,
-            'slug'     => $store->slug,
-            'name'     => $store->name,
-            'domain'   => $store->domain,
-            'currency' => $store->currency,
-            'timezone' => $store->timezone,
-            'status'   => $store->status,
-            'type'     => $store->type,
+            'id'                   => $store->id,
+            'slug'                 => $store->slug,
+            'name'                 => $store->name,
+            'domain'               => $store->domain,
+            'currency'             => $store->currency,
+            'timezone'             => $store->timezone,
+            'status'               => $store->status,
+            'type'                 => $store->type,
+            'primary_country_code' => $store->primary_country_code,
+            'website_url'          => $store->website_url,
         ];
     }
 }

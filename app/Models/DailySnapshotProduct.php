@@ -25,6 +25,7 @@ class DailySnapshotProduct extends Model
         'product_external_id',
         'product_name',
         'revenue',
+        'unit_cost',
         'units',
         'rank',
         'created_at',
@@ -35,7 +36,8 @@ class DailySnapshotProduct extends Model
         return [
             'snapshot_date' => 'date',
             'created_at' => 'datetime',
-            'revenue' => 'decimal:4',
+            'revenue'   => 'decimal:4',
+            'unit_cost' => 'decimal:4',
         ];
     }
 

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Head, router, useForm, usePage } from '@inertiajs/react';
-import { Database, Loader2, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
+import { Database, Loader2, PlugZap, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
 import AppLayout from '@/Components/layouts/AppLayout';
 import { PageHeader } from '@/Components/shared/PageHeader';
 import { StatusBadge } from '@/Components/shared/StatusBadge';
@@ -486,19 +486,24 @@ export default function Integrations({
     const { workspace: ws } = usePage<PageProps>().props;
     const w = (path: string) => wurl(ws?.slug, path);
 
-    // Auto-refresh every 15 s while any import is running/pending.
+    // Auto-refresh every 15 s while any import is running/pending or any sync is in progress.
     const anyImportActive =
         ad_accounts.some((a) => a.historical_import_status === 'running' || a.historical_import_status === 'pending') ||
         stores.some((s) => s.historical_import_status === 'running' || s.historical_import_status === 'pending') ||
         gsc_properties.some((p) => p.historical_import_status === 'running' || p.historical_import_status === 'pending');
 
+    const anySyncRunning =
+        ad_accounts.some((a) => a.sync_running) ||
+        stores.some((s) => s.sync_running) ||
+        gsc_properties.some((p) => p.sync_running);
+
     useEffect(() => {
-        if (!anyImportActive) return;
+        if (!anyImportActive && !anySyncRunning) return;
         const timer = setInterval(() => {
             router.reload({ only: ['ad_accounts', 'stores', 'gsc_properties'] });
         }, 15_000);
         return () => clearInterval(timer);
-    }, [anyImportActive]);
+    }, [anyImportActive, anySyncRunning]);
 
     const [connectingTo, setConnectingTo] = useState<string | null>(null);
 
@@ -648,7 +653,7 @@ export default function Integrations({
                     action={
                         canManage ? (
                             <a
-                                href="/onboarding?add_store=1"
+                                href={wurl(ws?.slug, '/stores/connect')}
                                 onClick={() => setConnectingTo('store')}
                                 className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
                             >
@@ -666,6 +671,7 @@ export default function Integrations({
                                 const syncing = store.sync_running || queuedSlugs.has(store.slug);
                                 const importActive = store.historical_import_status === 'running' || store.historical_import_status === 'pending';
                                 const canSync = ['active', 'error'].includes(store.status) && !importActive && !syncing;
+                                const importFailed = store.historical_import_status === 'failed';
 
                                 const menuItems: ActionItem[] = [
                                     ...(canSync ? [{
@@ -673,12 +679,6 @@ export default function Integrations({
                                         icon: <RefreshCw className="h-3.5 w-3.5" />,
                                         onClick: () => syncStore(store.slug),
                                         disabled: isProcessing(`sync-store-${store.slug}`),
-                                    }] : []),
-                                    ...(store.historical_import_status === 'failed' ? [{
-                                        label: 'Retry import',
-                                        icon: <RotateCcw className="h-3.5 w-3.5" />,
-                                        onClick: () => retryImportStore(store.slug),
-                                        disabled: isProcessing(`retry-store-${store.slug}`),
                                     }] : []),
                                     {
                                         label: 'Re-import data…',
@@ -728,7 +728,17 @@ export default function Integrations({
                                             </div>
                                         </div>
                                         {canManage && (
-                                            <div className="ml-4 shrink-0">
+                                            <div className="ml-4 flex shrink-0 items-center gap-2">
+                                                {importFailed && (
+                                                    <button
+                                                        onClick={() => retryImportStore(store.slug)}
+                                                        disabled={isProcessing(`retry-store-${store.slug}`)}
+                                                        className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 transition-colors disabled:opacity-50"
+                                                    >
+                                                        <RotateCcw className="h-3 w-3" />
+                                                        Resume import
+                                                    </button>
+                                                )}
                                                 <IntegrationActionsMenu items={menuItems} />
                                             </div>
                                         )}
@@ -776,6 +786,8 @@ export default function Integrations({
                                 const syncing = account.sync_running || queuedAdIds.has(account.id);
                                 const importActive = account.historical_import_status === 'running' || account.historical_import_status === 'pending';
                                 const canSync = ['active', 'error'].includes(account.status) && !importActive && !syncing;
+                                const tokenExpired = account.status === 'token_expired';
+                                const importFailed = account.historical_import_status === 'failed' && !tokenExpired;
 
                                 const menuItems: ActionItem[] = [
                                     ...(canSync ? [{
@@ -783,12 +795,6 @@ export default function Integrations({
                                         icon: <RefreshCw className="h-3.5 w-3.5" />,
                                         onClick: () => syncAdAccount(account.id),
                                         disabled: isProcessing(`sync-ad-${account.id}`),
-                                    }] : []),
-                                    ...(account.historical_import_status === 'failed' ? [{
-                                        label: 'Retry import',
-                                        icon: <RotateCcw className="h-3.5 w-3.5" />,
-                                        onClick: () => retryImportAdAccount(account.id),
-                                        disabled: isProcessing(`retry-ad-${account.id}`),
                                     }] : []),
                                     {
                                         label: 'Re-import data…',
@@ -828,7 +834,26 @@ export default function Integrations({
                                             </p>
                                         </div>
                                         {canManage && (
-                                            <div className="ml-4 shrink-0">
+                                            <div className="ml-4 flex shrink-0 items-center gap-2">
+                                                {tokenExpired && (
+                                                    <a
+                                                        href={`/oauth/facebook?reconnect_id=${account.id}`}
+                                                        className="inline-flex items-center gap-1.5 rounded-md bg-amber-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-600 transition-colors"
+                                                    >
+                                                        <PlugZap className="h-3 w-3" />
+                                                        Reconnect
+                                                    </a>
+                                                )}
+                                                {importFailed && (
+                                                    <button
+                                                        onClick={() => retryImportAdAccount(account.id)}
+                                                        disabled={isProcessing(`retry-ad-${account.id}`)}
+                                                        className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 transition-colors disabled:opacity-50"
+                                                    >
+                                                        <RotateCcw className="h-3 w-3" />
+                                                        Resume import
+                                                    </button>
+                                                )}
                                                 <IntegrationActionsMenu items={menuItems} />
                                             </div>
                                         )}
@@ -876,6 +901,8 @@ export default function Integrations({
                                 const syncing = account.sync_running || queuedAdIds.has(account.id);
                                 const importActive = account.historical_import_status === 'running' || account.historical_import_status === 'pending';
                                 const canSync = ['active', 'error'].includes(account.status) && !importActive && !syncing;
+                                const tokenExpired = account.status === 'token_expired';
+                                const importFailed = account.historical_import_status === 'failed' && !tokenExpired;
 
                                 const menuItems: ActionItem[] = [
                                     ...(canSync ? [{
@@ -883,12 +910,6 @@ export default function Integrations({
                                         icon: <RefreshCw className="h-3.5 w-3.5" />,
                                         onClick: () => syncAdAccount(account.id),
                                         disabled: isProcessing(`sync-ad-${account.id}`),
-                                    }] : []),
-                                    ...(account.historical_import_status === 'failed' ? [{
-                                        label: 'Retry import',
-                                        icon: <RotateCcw className="h-3.5 w-3.5" />,
-                                        onClick: () => retryImportAdAccount(account.id),
-                                        disabled: isProcessing(`retry-ad-${account.id}`),
                                     }] : []),
                                     {
                                         label: 'Re-import data…',
@@ -927,7 +948,26 @@ export default function Integrations({
                                             </p>
                                         </div>
                                         {canManage && (
-                                            <div className="ml-4 shrink-0">
+                                            <div className="ml-4 flex shrink-0 items-center gap-2">
+                                                {tokenExpired && (
+                                                    <a
+                                                        href={`/oauth/google/ads?reconnect_id=${account.id}`}
+                                                        className="inline-flex items-center gap-1.5 rounded-md bg-amber-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-600 transition-colors"
+                                                    >
+                                                        <PlugZap className="h-3 w-3" />
+                                                        Reconnect
+                                                    </a>
+                                                )}
+                                                {importFailed && (
+                                                    <button
+                                                        onClick={() => retryImportAdAccount(account.id)}
+                                                        disabled={isProcessing(`retry-ad-${account.id}`)}
+                                                        className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 transition-colors disabled:opacity-50"
+                                                    >
+                                                        <RotateCcw className="h-3 w-3" />
+                                                        Resume import
+                                                    </button>
+                                                )}
                                                 <IntegrationActionsMenu items={menuItems} />
                                             </div>
                                         )}
@@ -967,6 +1007,8 @@ export default function Integrations({
                                 const syncing = prop.sync_running || queuedGscIds.has(prop.id);
                                 const importActive = prop.historical_import_status === 'running' || prop.historical_import_status === 'pending';
                                 const canSync = ['active', 'error'].includes(prop.status) && !importActive && !syncing;
+                                const tokenExpired = prop.status === 'token_expired';
+                                const importFailed = prop.historical_import_status === 'failed' && !tokenExpired;
 
                                 const menuItems: ActionItem[] = [
                                     ...(canSync ? [{
@@ -974,12 +1016,6 @@ export default function Integrations({
                                         icon: <RefreshCw className="h-3.5 w-3.5" />,
                                         onClick: () => syncGsc(prop.id),
                                         disabled: isProcessing(`sync-gsc-${prop.id}`),
-                                    }] : []),
-                                    ...(prop.historical_import_status === 'failed' ? [{
-                                        label: 'Retry import',
-                                        icon: <RotateCcw className="h-3.5 w-3.5" />,
-                                        onClick: () => retryImportGsc(prop.id),
-                                        disabled: isProcessing(`retry-gsc-${prop.id}`),
                                     }] : []),
                                     {
                                         label: 'Re-import data…',
@@ -1018,7 +1054,26 @@ export default function Integrations({
                                             </p>
                                         </div>
                                         {canManage && (
-                                            <div className="ml-4 shrink-0">
+                                            <div className="ml-4 flex shrink-0 items-center gap-2">
+                                                {tokenExpired && (
+                                                    <a
+                                                        href={`/oauth/google/gsc?reconnect_id=${prop.id}`}
+                                                        className="inline-flex items-center gap-1.5 rounded-md bg-amber-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-600 transition-colors"
+                                                    >
+                                                        <PlugZap className="h-3 w-3" />
+                                                        Reconnect
+                                                    </a>
+                                                )}
+                                                {importFailed && (
+                                                    <button
+                                                        onClick={() => retryImportGsc(prop.id)}
+                                                        disabled={isProcessing(`retry-gsc-${prop.id}`)}
+                                                        className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 transition-colors disabled:opacity-50"
+                                                    >
+                                                        <RotateCcw className="h-3 w-3" />
+                                                        Resume import
+                                                    </button>
+                                                )}
                                                 <IntegrationActionsMenu items={menuItems} />
                                             </div>
                                         )}

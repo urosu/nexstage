@@ -33,6 +33,17 @@ export interface Store {
     last_synced_at: string | null;
 }
 
+/** One integration's sync freshness — used by DataFreshness component. */
+export interface IntegrationFreshness {
+    label: string;
+    type: 'store' | 'ad_account' | 'gsc';
+    platform?: string;
+    status: string;
+    last_synced_at: string | null;
+    consecutive_sync_failures: number;
+    historical_import_status?: string | null;
+}
+
 export interface Alert {
     id: number;
     type: string;
@@ -41,6 +52,15 @@ export interface Alert {
     read_at?: string;
     resolved_at?: string;
     created_at: string;
+}
+
+export interface AttributionBackfillProgress {
+    status: 'running' | 'completed' | 'failed';
+    processed: number;
+    total: number;
+    started_at: string;
+    completed_at: string | null;
+    error?: string;
 }
 
 export interface AdminWorkspace {
@@ -53,6 +73,7 @@ export interface AdminWorkspace {
     owner: { id: number; name: string; email: string } | null;
     created_at: string;
     deleted_at: string | null;
+    attribution_backfill: AttributionBackfillProgress | null;
 }
 
 export interface AdminUser {
@@ -74,6 +95,7 @@ export type PageProps<
     workspace?: Workspace;
     workspaces?: Workspace[];
     stores?: Store[];
+    integrations_freshness?: IntegrationFreshness[];
     unread_alerts_count?: number;
     workspace_role?: 'owner' | 'admin' | 'member' | null;
     impersonating?: boolean;

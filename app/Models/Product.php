@@ -18,6 +18,7 @@ class Product extends Model
         'store_id',
         'external_id',
         'name',
+        'slug',
         'sku',
         'price',
         'status',

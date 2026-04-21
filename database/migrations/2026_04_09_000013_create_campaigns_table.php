@@ -16,6 +16,18 @@ return new class extends Migration
             $table->foreignId('ad_account_id')->constrained('ad_accounts')->cascadeOnDelete();
             $table->string('external_id');
             $table->string('name', 500);
+
+            // Array of historical names used by this campaign. Enables RevenueAttributionService
+            // to match orders whose utm_campaign value refers to an old name before renaming.
+            // @see PLANNING.md section 5, 16
+            $table->jsonb('previous_names')->default('[]');
+
+            // Output of CampaignNameParserService. Shape: {country, campaign, target, raw_target}.
+            // NULL when campaign name does not match any of the three supported shapes.
+            // Used for country-level spend attribution via COALESCE(parsed_convention->>'country', ...).
+            // @see PLANNING.md section 5, 16
+            $table->jsonb('parsed_convention')->nullable();
+
             $table->string('status', 100)->nullable();
             $table->string('objective', 100)->nullable();
 

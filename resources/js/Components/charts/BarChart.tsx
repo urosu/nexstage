@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useLayoutEffect, useRef, useState, useMemo } from 'react';
 import {
     BarChart as RechartsBarChart,
     Bar,
@@ -6,7 +6,6 @@ import {
     YAxis,
     CartesianGrid,
     Tooltip,
-    ResponsiveContainer,
     Legend,
     Cell,
     ReferenceLine,
@@ -105,14 +104,30 @@ const BarChartWrapper = React.memo(function BarChartWrapper({
         }));
     }, [data, comparisonData, series]);
 
+    const containerRef = useRef<HTMLDivElement>(null);
+    const [chartSize, setChartSize] = useState<{ w: number; h: number } | null>(null);
+    useLayoutEffect(() => {
+        const el = containerRef.current;
+        if (!el) return;
+        const { width, height } = el.getBoundingClientRect();
+        if (width > 0) setChartSize({ w: width, h: height });
+        const ro = new ResizeObserver(([entry]) => {
+            const { inlineSize: w, blockSize: h } = entry.contentBoxSize[0];
+            setChartSize({ w, h });
+        });
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, []);
+
     if (loading) return <BarChartSkeleton />;
 
     const hasComparison = !series && !!comparisonData?.length;
 
     return (
-        <div className={className ?? 'h-64 w-full'}>
-            <ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{ width: 0, height: 1 }}>
-                <RechartsBarChart
+        <div ref={containerRef} className={className ?? 'h-64 w-full'}>
+            {chartSize && <RechartsBarChart
+                    width={chartSize.w}
+                    height={chartSize.h}
                     data={merged}
                     margin={{ top: 4, right: 8, left: 0, bottom: 0 }}
                     barCategoryGap="30%"
@@ -216,8 +231,7 @@ const BarChartWrapper = React.memo(function BarChartWrapper({
                             label={(props: object) => <NoteMarker {...(props as NoteMarkerProps)} note={note} />}
                         />
                     ))}
-                </RechartsBarChart>
-            </ResponsiveContainer>
+            </RechartsBarChart>}
         </div>
     );
 });

@@ -9,6 +9,8 @@ use App\Models\Order;
 use App\Models\OrderCoupon;
 use App\Models\OrderItem;
 use App\Models\Store;
+use App\Services\Attribution\AttributionParserService;
+use App\Services\Cogs\CogsReaderService;
 use App\Services\Fx\FxRateService;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -19,6 +21,23 @@ use Illuminate\Support\Facades\Log;
  *
  * Precondition: WorkspaceContext MUST be set by the calling job before invoking
  * this action. The action uses workspace-scoped Eloquent queries internally.
+ *
+ * Attribution (Step 7, PLANNING section 6):
+ *   When config('attribution.parser_enabled') is true, AttributionParserService runs
+ *   once per order and writes attribution_source, attribution_first_touch,
+ *   attribution_last_touch, attribution_click_ids, and attribution_parsed_at.
+ *   Existing utm_* column writes are preserved unchanged so RevenueAttributionService
+ *   continues to work during the rollout window (Step 14 cutover flips the reads).
+ *
+ * COGS (Step 7, PLANNING section 7):
+ *   CogsReaderService reads unit cost from each line item's meta_data on every sync.
+ *   Writes to order_items.unit_cost. Not feature-flagged — COGS data is safe to
+ *   write immediately and has no impact on existing attribution reads.
+ *
+ * PYS data in raw_meta:
+ *   pys_enrich_data and pys_fb_cookie are array-valued meta entries (non-scalar, so
+ *   excluded from buildMetaMap). They are extracted separately and stored in raw_meta
+ *   so PixelYourSiteSource can read them from orders.raw_meta on attribution parse.
  *
  * FX conversion:
  *   - On success: total_in_reporting_currency is populated.
@@ -43,6 +62,8 @@ class UpsertWooCommerceOrderAction
 {
     public function __construct(
         private readonly FxRateService $fx,
+        private readonly AttributionParserService $parser,
+        private readonly CogsReaderService $cogs,
     ) {}
 
     /**
@@ -59,8 +80,12 @@ class UpsertWooCommerceOrderAction
 
         $totalInReporting = $this->convertTotal($total, $orderCurrency, $reportingCurrency, $occurredAt, $store->id, $externalId);
 
-        // Index meta_data once; shared by all UTM + source_type lookups below.
+        // Index scalar meta_data once; shared by all UTM + source_type lookups below.
         $metaMap = $this->buildMetaMap($wcOrder);
+
+        // Build raw_meta as an array so it can be shared with the attribution parser
+        // (PixelYourSiteSource reads pys_enrich_data from orders.raw_meta).
+        $rawMetaArray = $this->buildRawMetaArray($wcOrder);
 
         $orderRow = [
             'workspace_id'                => $store->workspace_id,
@@ -93,7 +118,7 @@ class UpsertWooCommerceOrderAction
             'utm_content'                 => $this->utmFromMetaMap($metaMap, 'utm_content'),
             'utm_term'                    => $this->utmFromMetaMap($metaMap, 'utm_term'),
             'source_type'                 => $metaMap['_wc_order_attribution_source_type'] ?? null,
-            'raw_meta'                    => $this->buildRawMeta($wcOrder),
+            'raw_meta'                    => ! empty($rawMetaArray) ? json_encode($rawMetaArray) : null,
             'raw_meta_api_version'        => 'wc/v3',
             'occurred_at'                 => $occurredAt->toDateTimeString(),
             'synced_at'                   => now()->toDateTimeString(),
@@ -101,21 +126,49 @@ class UpsertWooCommerceOrderAction
             'updated_at'                  => now()->toDateTimeString(),
         ];
 
-        DB::transaction(function () use ($store, $externalId, $orderRow, $wcOrder): void {
+        // Base update columns — always applied on conflict.
+        $updateColumns = [
+            'external_number', 'status', 'currency', 'total', 'subtotal',
+            'tax', 'shipping', 'discount', 'total_in_reporting_currency',
+            'customer_email_hash', 'customer_country', 'customer_id',
+            'payment_method', 'payment_method_title', 'shipping_country',
+            'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'source_type',
+            'raw_meta', 'raw_meta_api_version',
+            'occurred_at', 'synced_at', 'updated_at',
+        ];
+
+        // Attribution pipeline — feature-flagged during rollout window.
+        // utm_* columns are always written above; the parser writes to separate
+        // attribution_* columns. RevenueAttributionService continues reading from
+        // utm_* until Step 14 cutover.
+        if (config('attribution.parser_enabled')) {
+            $parsed = $this->runParser($store, $orderRow, $rawMetaArray);
+
+            $orderRow['attribution_source']      = $parsed->source_type;
+            $orderRow['attribution_first_touch'] = $parsed->toTouchArray($parsed->first_touch) !== null
+                ? json_encode($parsed->toTouchArray($parsed->first_touch))
+                : null;
+            $orderRow['attribution_last_touch']  = $parsed->toTouchArray($parsed->last_touch) !== null
+                ? json_encode($parsed->toTouchArray($parsed->last_touch))
+                : null;
+            $orderRow['attribution_click_ids']   = $parsed->click_ids !== null
+                ? json_encode($parsed->click_ids)
+                : null;
+            $orderRow['attribution_parsed_at']   = now()->toDateTimeString();
+
+            $updateColumns = array_merge($updateColumns, [
+                'attribution_source', 'attribution_first_touch', 'attribution_last_touch',
+                'attribution_click_ids', 'attribution_parsed_at',
+            ]);
+        }
+
+        DB::transaction(function () use ($store, $externalId, $orderRow, $updateColumns, $wcOrder): void {
             // Upsert the order. created_at is excluded from update to preserve
             // the original ingestion timestamp on re-syncs.
             Order::upsert(
                 [$orderRow],
                 uniqueBy: ['store_id', 'external_id'],
-                update: [
-                    'external_number', 'status', 'currency', 'total', 'subtotal',
-                    'tax', 'shipping', 'discount', 'total_in_reporting_currency',
-                    'customer_email_hash', 'customer_country', 'customer_id',
-                    'payment_method', 'payment_method_title', 'shipping_country',
-                    'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'source_type',
-                    'raw_meta', 'raw_meta_api_version',
-                    'occurred_at', 'synced_at', 'updated_at',
-                ],
+                update: $updateColumns,
             );
 
             // Retrieve the order PK — needed to associate items.
@@ -155,6 +208,34 @@ class UpsertWooCommerceOrderAction
     // -------------------------------------------------------------------------
     // Private helpers
     // -------------------------------------------------------------------------
+
+    /**
+     * Hydrate a temporary (unsaved) Order model from the in-flight order row and raw_meta array.
+     *
+     * The parser sources read from Order model attributes — utm_* columns (WooCommerceNativeSource),
+     * raw_meta array (PixelYourSiteSource). We construct a hydrated Order here rather than
+     * round-tripping through the DB, since the order may not exist yet on first insert.
+     *
+     * @param  array<string, mixed> $orderRow      The built order row (pre-insert).
+     * @param  array<string, mixed> $rawMetaArray  Decoded raw meta (PYS data included).
+     */
+    private function runParser(Store $store, array $orderRow, array $rawMetaArray): \App\ValueObjects\ParsedAttribution
+    {
+        $tempOrder = new Order();
+        $tempOrder->forceFill([
+            'workspace_id'  => $store->workspace_id,
+            'utm_source'    => $orderRow['utm_source'],
+            'utm_medium'    => $orderRow['utm_medium'],
+            'utm_campaign'  => $orderRow['utm_campaign'],
+            'utm_content'   => $orderRow['utm_content'],
+            'utm_term'      => $orderRow['utm_term'],
+            'source_type'   => $orderRow['source_type'],
+            // Assign as array — the 'array' cast handles it transparently.
+            'raw_meta'      => ! empty($rawMetaArray) ? $rawMetaArray : null,
+        ]);
+
+        return $this->parser->parse($tempOrder);
+    }
 
     private function convertTotal(
         float  $total,
@@ -210,6 +291,8 @@ class UpsertWooCommerceOrderAction
      * Build a key→value map from the order's top-level meta_data array.
      *
      * Iterates once; all UTM and source_type lookups share the result.
+     * Array-valued meta entries (e.g. pys_enrich_data) are intentionally excluded
+     * here — they are extracted separately by buildRawMetaArray().
      *
      * @param  array<string, mixed> $wcOrder
      * @return array<string, string>
@@ -261,7 +344,54 @@ class UpsertWooCommerceOrderAction
     }
 
     /**
+     * Build the raw_meta payload array from supplementary order fields.
+     *
+     * Captures fee_lines and customer_note (supplementary, not promoted to dedicated columns)
+     * plus PYS array-valued meta entries needed by PixelYourSiteSource:
+     *   - pys_enrich_data — UTM + landing page data (priority attribution source)
+     *   - pys_fb_cookie   — {fbc, fbp} for Phase 4 CAPI enabler
+     *
+     * PYS keys are array-valued so buildMetaMap() skips them; we extract them here
+     * with a separate pass over meta_data.
+     *
+     * Returns an array (not JSON). Callers json_encode when writing to the DB column.
+     *
+     * @param  array<string, mixed> $wcOrder
+     * @return array<string, mixed>
+     */
+    private function buildRawMetaArray(array $wcOrder): array
+    {
+        $meta = [];
+
+        if (! empty($wcOrder['fee_lines'])) {
+            $meta['fee_lines'] = $wcOrder['fee_lines'];
+        }
+
+        if (isset($wcOrder['customer_note']) && $wcOrder['customer_note'] !== '') {
+            $meta['customer_note'] = $wcOrder['customer_note'];
+        }
+
+        // Extract PYS array-valued meta entries.
+        // These keys hold structured arrays and are excluded from buildMetaMap()
+        // because that method skips non-scalar values for safe UTM extraction.
+        foreach ($wcOrder['meta_data'] ?? [] as $metaEntry) {
+            $key = (string) ($metaEntry['key'] ?? '');
+            $val = $metaEntry['value'] ?? null;
+
+            if (in_array($key, ['pys_enrich_data', 'pys_fb_cookie'], true) && is_array($val)) {
+                $meta[$key] = $val;
+            }
+        }
+
+        return $meta;
+    }
+
+    /**
      * Build the rows to insert into order_items for a single order.
+     *
+     * Calls CogsReaderService per line item to populate unit_cost from whichever
+     * WooCommerce COGS plugin is installed (WC core / WPFactory / WC.com).
+     * See PLANNING section 7. unit_cost is written on every sync — not feature-flagged.
      *
      * WooCommerce can occasionally send two line_item entries for the same
      * product+variant within one order (e.g. split lines on partial refunds).
@@ -298,6 +428,7 @@ class UpsertWooCommerceOrderAction
                     'sku'                 => $this->nullableString($item['sku'] ?? null),
                     'quantity'            => (int) ($item['quantity'] ?? 0),
                     'unit_price'          => (float) ($item['price'] ?? 0),
+                    'unit_cost'           => $this->cogs->readFromLineItem($item),
                     'line_total'          => (float) ($item['total'] ?? 0),
                     'created_at'          => $now,
                     'updated_at'          => $now,
@@ -306,29 +437,6 @@ class UpsertWooCommerceOrderAction
         }
 
         return array_values($deduped);
-    }
-
-    /**
-     * Build the raw_meta JSONB payload from supplementary order fields.
-     *
-     * Captures fee_lines and customer_note — fields not promoted to dedicated
-     * columns but needed for future diagnostics (e.g. custom fee detection).
-     *
-     * @param array<string, mixed> $wcOrder
-     */
-    private function buildRawMeta(array $wcOrder): ?string
-    {
-        $meta = [];
-
-        if (! empty($wcOrder['fee_lines'])) {
-            $meta['fee_lines'] = $wcOrder['fee_lines'];
-        }
-
-        if (isset($wcOrder['customer_note']) && $wcOrder['customer_note'] !== '') {
-            $meta['customer_note'] = $wcOrder['customer_note'];
-        }
-
-        return ! empty($meta) ? json_encode($meta) : null;
     }
 
     /**

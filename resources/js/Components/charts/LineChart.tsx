@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useLayoutEffect, useRef, useMemo, useState } from 'react';
 import {
     LineChart as RechartsLineChart,
     Line,
@@ -6,7 +6,6 @@ import {
     YAxis,
     CartesianGrid,
     Tooltip,
-    ResponsiveContainer,
     Legend,
     ReferenceLine,
 } from 'recharts';
@@ -101,10 +100,25 @@ const LineChartWrapper = React.memo(function LineChartWrapper({
 
     const [hoveredNote, setHoveredNote] = useState<{ note: string; x: number; y: number } | null>(null);
 
+    const containerRef = useRef<HTMLDivElement>(null);
+    const [chartSize, setChartSize] = useState<{ w: number; h: number } | null>(null);
+    useLayoutEffect(() => {
+        const el = containerRef.current;
+        if (!el) return;
+        const { width, height } = el.getBoundingClientRect();
+        if (width > 0) setChartSize({ w: width, h: height });
+        const ro = new ResizeObserver(([entry]) => {
+            const { inlineSize: w, blockSize: h } = entry.contentBoxSize[0];
+            setChartSize({ w, h });
+        });
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, []);
+
     if (loading) return <LineChartSkeleton />;
 
     return (
-        <div className={`relative ${className ?? 'h-64 w-full'}`}>
+        <div ref={containerRef} className={`relative ${className ?? 'h-64 w-full'}`}>
             {hoveredNote && (
                 <div
                     className="pointer-events-none absolute z-10 max-w-[220px] -translate-x-1/2 -translate-y-full rounded border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-700 shadow-md"
@@ -113,8 +127,9 @@ const LineChartWrapper = React.memo(function LineChartWrapper({
                     {hoveredNote.note}
                 </div>
             )}
-            <ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{ width: 0, height: 1 }}>
-                <RechartsLineChart
+            {chartSize && <RechartsLineChart
+                    width={chartSize.w}
+                    height={chartSize.h}
                     data={merged}
                     margin={{ top: 4, right: 8, left: 0, bottom: 0 }}
                 >
@@ -193,8 +208,7 @@ const LineChartWrapper = React.memo(function LineChartWrapper({
                             )}
                         />
                     ))}
-                </RechartsLineChart>
-            </ResponsiveContainer>
+            </RechartsLineChart>}
         </div>
     );
 });

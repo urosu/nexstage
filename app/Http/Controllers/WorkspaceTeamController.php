@@ -45,7 +45,7 @@ class WorkspaceTeamController extends Controller
                 'email'      => $inv->email,
                 'role'       => $inv->role,
                 'expires_at' => $inv->expires_at,
-                'token'      => $inv->token,
+                // token intentionally omitted — raw acceptance token must not reach the browser
             ]);
 
         $userRole = WorkspaceUser::where('workspace_id', $workspace->id)

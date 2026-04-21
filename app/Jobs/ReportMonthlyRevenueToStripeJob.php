@@ -313,6 +313,7 @@ class ReportMonthlyRevenueToStripeJob implements ShouldQueue
         return (float) DB::table('ad_insights')
             ->join('ad_accounts', 'ad_insights.ad_account_id', '=', 'ad_accounts.id')
             ->where('ad_accounts.workspace_id', $workspace->id)
+            ->where('ad_insights.workspace_id', $workspace->id)
             ->where('ad_insights.level', 'campaign')
             ->whereBetween('ad_insights.date', [$from, $to])
             ->select(DB::raw('COALESCE(SUM(ad_insights.spend_in_reporting_currency), 0) AS total'))

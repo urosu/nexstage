@@ -17,7 +17,7 @@ class WorkspaceSwitchController extends Controller
      * Verifies membership before writing to session to prevent workspace enumeration.
      * Redirects to /{workspace-slug}/dashboard so the URL reflects the new workspace.
      */
-    public function __invoke(Request $request, int $workspace): RedirectResponse
+    public function __invoke(Request $request, string $workspace): RedirectResponse
     {
         $workspaceModel = Workspace::whereNull('deleted_at')->find($workspace);
 

@@ -1,6 +1,15 @@
 import axios from 'axios';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Head, Link, router, usePage } from '@inertiajs/react';
+
+// Why: When Inertia swaps components via flushSync mid-navigation, the new component
+// initialises with useState(false) and renders stale cached data before the real server
+// response arrives. Tracking navigation state at module level lets us start with
+// navigating=true so the skeleton stays visible until the real data is ready.
+let _inertiaNavigating = false;
+router.on('start',  () => { _inertiaNavigating = true; });
+router.on('finish', () => { _inertiaNavigating = false; });
+
 import {
     AlertTriangle,
     Bot,
@@ -8,7 +17,6 @@ import {
     Gauge,
     Lightbulb,
     NotebookPen,
-    Search,
     ShoppingBag,
     TrendingUp,
     TriangleAlert,
@@ -21,11 +29,13 @@ import { DateRangePicker } from '@/Components/shared/DateRangePicker';
 import { PageHeader } from '@/Components/shared/PageHeader';
 import { MetricCard } from '@/Components/shared/MetricCard';
 import { StoreFilter } from '@/Components/shared/StoreFilter';
+import { UtmCoverageNudgeModal } from '@/Components/shared/UtmCoverageNudgeModal';
 import { MultiSeriesLineChart } from '@/Components/charts/MultiSeriesLineChart';
 import type { MultiSeriesPoint, HolidayOverlay, WorkspaceEventOverlay } from '@/Components/charts/MultiSeriesLineChart';
 import { formatCurrency, formatNumber, type Granularity } from '@/lib/formatters';
 import type { PageProps } from '@/types';
 import { cn } from '@/lib/utils';
+import { wurl } from '@/lib/workspace-url';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -181,8 +191,9 @@ function NoteInput({ date, initialNote }: { date: string; initialNote: string | 
     const [value, setValue] = useState(initialNote ?? '');
     const [saving, setSaving] = useState(false);
     const [savedFlash, setSavedFlash] = useState(false);
-    const lastSavedRef = useRef(initialNote ?? '');
-    const focusedRef   = useRef(false);
+    const lastSavedRef  = useRef(initialNote ?? '');
+    const focusedRef    = useRef(false);
+    const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     useEffect(() => {
         if (!focusedRef.current) {
@@ -192,6 +203,8 @@ function NoteInput({ date, initialNote }: { date: string; initialNote: string | 
         }
     }, [initialNote]);
 
+    useEffect(() => () => { if (flashTimerRef.current) clearTimeout(flashTimerRef.current); }, []);
+
     function save(current: string): void {
         if (current === lastSavedRef.current) return;
         setSaving(true);
@@ -200,7 +213,8 @@ function NoteInput({ date, initialNote }: { date: string; initialNote: string | 
             .then(() => {
                 lastSavedRef.current = current;
                 setSavedFlash(true);
-                setTimeout(() => setSavedFlash(false), 2000);
+                if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+                flashTimerRef.current = setTimeout(() => setSavedFlash(false), 2000);
             })
             .catch(() => setValue(lastSavedRef.current))
             .finally(() => setSaving(false));
@@ -265,6 +279,7 @@ function NoteInput({ date, initialNote }: { date: string; initialNote: string | 
  * See: PLANNING.md "UTM Coverage Health Check + Tag Generator"
  */
 function UtmCoverageBadge({ coverage }: { coverage: UtmCoverage }) {
+    const { workspace } = usePage<PageProps>().props;
     const [showTip, setShowTip] = useState(false);
 
     if (!coverage.status) return null;
@@ -308,7 +323,7 @@ function UtmCoverageBadge({ coverage }: { coverage: UtmCoverage }) {
                     <p className="text-xs text-zinc-600">{messages[coverage.status]}</p>
                     {coverage.status !== 'green' && (
                         <Link
-                            href="/manage/tag-generator"
+                            href={wurl(workspace?.slug, '/manage/tag-generator')}
                             className="mt-1.5 block text-xs font-medium text-primary hover:underline"
                         >
                             Open Tag Generator →
@@ -327,30 +342,54 @@ function UtmCoverageBadge({ coverage }: { coverage: UtmCoverage }) {
  * Shown inside Paid Ads section. Points user to Tag Generator to fix.
  * See: PLANNING.md "UTM Coverage Health Check + Tag Generator" — unrecognized sources
  */
-function UnrecognizedSourcesBanner({ sources }: { sources: UnrecognizedSource[] }) {
+function UnrecognizedSourcesBanner({ sources, workspaceSlug }: { sources: UnrecognizedSource[]; workspaceSlug: string | undefined }) {
     const [dismissed, setDismissed] = useState(false);
+    const [expanded, setExpanded]   = useState(false);
     if (dismissed || sources.length === 0) return null;
 
     const examples = sources.slice(0, 3).map((s) => `'${s.source}'`).join(', ');
 
     return (
-        <div className="mt-3 flex items-start gap-2.5 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
-            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
-            <div className="flex-1">
-                We found unrecognized utm_source values ({examples}
-                {sources.length > 3 ? ` and ${sources.length - 3} more` : ''}) that don't
-                match any known channel and aren't counted in paid attribution.{' '}
-                <Link href="/manage/tag-generator" className="font-medium underline hover:no-underline">
-                    Fix with Tag Generator →
-                </Link>
+        <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
+            <div className="flex items-start gap-2.5">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
+                <div className="flex-1">
+                    We found unrecognized utm_source values ({examples}
+                    {sources.length > 3 ? ` and ${sources.length - 3} more` : ''}) that don't
+                    match any known channel and aren't counted in paid attribution.{' '}
+                    {sources.length > 3 && (
+                        <button
+                            onClick={() => setExpanded(!expanded)}
+                            className="font-medium underline hover:no-underline"
+                        >
+                            {expanded ? 'Hide full list' : 'Show all'}
+                        </button>
+                    )}
+                    {sources.length > 3 && ' · '}
+                    <Link href={wurl(workspaceSlug, '/manage/tag-generator')} className="font-medium underline hover:no-underline">
+                        Fix with Tag Generator →
+                    </Link>
+                </div>
+                <button
+                    onClick={() => setDismissed(true)}
+                    className="shrink-0 text-amber-400 hover:text-amber-600"
+                    aria-label="Dismiss"
+                >
+                    <X className="h-3.5 w-3.5" />
+                </button>
             </div>
-            <button
-                onClick={() => setDismissed(true)}
-                className="shrink-0 text-amber-400 hover:text-amber-600"
-                aria-label="Dismiss"
-            >
-                <X className="h-3.5 w-3.5" />
-            </button>
+            {expanded && (
+                <div className="ml-6 mt-2 space-y-1">
+                    {sources.map((s) => (
+                        <div key={s.source} className="flex items-center gap-2 tabular-nums">
+                            <code className="rounded bg-amber-100 px-1 py-0.5 text-[11px]">{s.source}</code>
+                            <span className="text-amber-600">
+                                {s.order_count} order{s.order_count !== 1 ? 's' : ''} · {s.revenue_pct}% of tagged revenue
+                            </span>
+                        </div>
+                    ))}
+                </div>
+            )}
         </div>
     );
 }
@@ -468,6 +507,7 @@ function ChannelSection({
 // ─── Attention card ───────────────────────────────────────────────────────────
 
 function AttentionCard({ alert, daysOfData }: { alert: TopAlert | null; daysOfData: number }) {
+    const { workspace } = usePage<PageProps>().props;
     const BASELINE_DAYS = 28;
     const learningComplete = daysOfData >= BASELINE_DAYS;
 
@@ -496,7 +536,7 @@ function AttentionCard({ alert, daysOfData }: { alert: TopAlert | null; daysOfDa
                     {alert.severity}
                 </div>
                 <div className="min-h-[20px]">
-                    <Link href="/insights" className={cn(
+                    <Link href={wurl(workspace?.slug, '/insights')} className={cn(
                         'text-xs hover:underline',
                         isCritical ? 'text-red-500' : 'text-amber-500',
                     )}>
@@ -561,6 +601,7 @@ function AttentionCard({ alert, daysOfData }: { alert: TopAlert | null; daysOfDa
  * See: PLANNING.md "Not Tracked" sign-aware section
  */
 function NotTrackedInflationBanner({ onDismiss }: { onDismiss: () => void }) {
+    const { workspace } = usePage<PageProps>().props;
     return (
         <div className="mb-4 flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
@@ -568,7 +609,7 @@ function NotTrackedInflationBanner({ onDismiss }: { onDismiss: () => void }) {
                 <span className="font-semibold">Ad platforms are claiming more revenue than your store received.</span>{' '}
                 This usually indicates iOS14+ modeled conversions — Facebook or Google are attributing orders
                 that your store didn't record.{' '}
-                <Link href="/help/data-accuracy#roas" className="underline hover:no-underline">
+                <Link href={wurl(workspace?.slug, '/help/data-accuracy#roas')} className="underline hover:no-underline">
                     Learn more about attribution overlap →
                 </Link>
             </div>
@@ -590,6 +631,35 @@ function NotTrackedInflationBanner({ onDismiss }: { onDismiss: () => void }) {
  * Helps the user understand which channel drove a revenue change.
  * See: PLANNING.md Phase 1.2 "Period comparison: per-channel delta table"
  */
+function DeltaCell({ value, pctValue, currency: cur, invert = false, isCount = false }: {
+    value: number | null;
+    pctValue: number | null;
+    currency?: string;
+    invert?: boolean;
+    isCount?: boolean;
+}) {
+    if (value === null) return <td className="px-3 py-2.5 text-sm text-zinc-300">—</td>;
+    const positive = value >= 0;
+    const good = invert ? !positive : positive;
+    return (
+        <td className="px-3 py-2.5 text-sm tabular-nums">
+            <span className={good ? 'text-green-600' : 'text-red-500'}>
+                {positive ? '+' : ''}
+                {isCount
+                    ? formatNumber(Math.round(value))
+                    : cur
+                    ? formatCurrency(value, cur)
+                    : `${value.toFixed(1)}%`}
+            </span>
+            {pctValue !== null && (
+                <span className="ml-1 text-xs text-zinc-400">
+                    ({positive ? '+' : ''}{pctValue.toFixed(1)}%)
+                </span>
+            )}
+        </td>
+    );
+}
+
 function PeriodComparisonTable({
     metrics,
     compareMetrics,
@@ -616,35 +686,6 @@ function PeriodComparisonTable({
     const adSpendDelta  = delta(metrics.ad_spend, compareMetrics.ad_spend);
     const clicksDelta   = delta(gscMetrics?.gsc_clicks ?? null, compareGscMetrics?.gsc_clicks ?? null);
     const notTrackedDelta = delta(metrics.not_tracked_revenue, compareMetrics.not_tracked_revenue);
-
-    function DeltaCell({ value, pctValue, currency: cur, invert = false, isCount = false }: {
-        value: number | null;
-        pctValue: number | null;
-        currency?: string;
-        invert?: boolean;
-        isCount?: boolean;
-    }) {
-        if (value === null) return <td className="px-3 py-2.5 text-sm text-zinc-300">—</td>;
-        const positive = value >= 0;
-        const good = invert ? !positive : positive;
-        return (
-            <td className="px-3 py-2.5 text-sm tabular-nums">
-                <span className={good ? 'text-green-600' : 'text-red-500'}>
-                    {positive ? '+' : ''}
-                    {isCount
-                        ? formatNumber(Math.round(value))
-                        : cur
-                        ? formatCurrency(value, cur)
-                        : `${value.toFixed(1)}%`}
-                </span>
-                {pctValue !== null && (
-                    <span className="ml-1 text-xs text-zinc-400">
-                        ({positive ? '+' : ''}{pctValue.toFixed(1)}%)
-                    </span>
-                )}
-            </td>
-        );
-    }
 
     return (
         <div className="mt-4 overflow-hidden rounded-xl border border-zinc-200 bg-white">
@@ -711,7 +752,7 @@ function PeriodComparisonTable({
  * Honest labeling is the trust mechanism.
  * See: PLANNING.md "Latest orders feed" (Phase 1.4 widget)
  */
-function LatestOrdersFeed({ feed, currency }: { feed: RecentOrders; currency: string }) {
+function LatestOrdersFeed({ feed, currency, workspaceSlug }: { feed: RecentOrders; currency: string; workspaceSlug: string | undefined }) {
     function relativeTime(iso: string): string {
         const diff  = Date.now() - new Date(iso).getTime();
         const mins  = Math.floor(diff / 60_000);
@@ -757,7 +798,11 @@ function LatestOrdersFeed({ feed, currency }: { feed: RecentOrders; currency: st
             </div>
             <div className="divide-y divide-zinc-100">
                 {feed.orders.slice(0, 5).map(order => (
-                    <div key={order.id} className="flex items-center justify-between px-4 py-2">
+                    <Link
+                        key={order.id}
+                        href={wurl(workspaceSlug, `/orders/${order.id}`)}
+                        className="flex items-center justify-between px-4 py-2 transition-colors hover:bg-white"
+                    >
                         <div className="flex items-center gap-2 min-w-0">
                             <span className="text-xs font-medium text-zinc-700 shrink-0">
                                 #{order.order_number}
@@ -777,7 +822,7 @@ function LatestOrdersFeed({ feed, currency }: { feed: RecentOrders; currency: st
                                 {relativeTime(order.occurred_at)}
                             </span>
                         </div>
-                    </div>
+                    </Link>
                 ))}
             </div>
         </div>
@@ -832,7 +877,7 @@ export default function Dashboard({
     const hasGsc   = workspace?.has_gsc   ?? false;
     const hasPsi   = workspace?.has_psi   ?? false;
 
-    const [navigating, setNavigating] = useState(false);
+    const [navigating, setNavigating] = useState(() => _inertiaNavigating);
     const [showNotes, setShowNotes]   = useState(true);
 
     // iOS14 Not Tracked inflation banner — dismiss stored server-side per-workspace.
@@ -849,7 +894,7 @@ export default function Dashboard({
 
     function handleDismissBanner(): void {
         setBannerDismissed(true);
-        axios.post('/dashboard/dismiss-not-tracked-banner').catch(() => {
+        axios.post(wurl(workspace?.slug, '/dashboard/dismiss-not-tracked-banner')).catch(() => {
             // Non-critical — banner stays dismissed locally even if request fails
         });
     }
@@ -894,9 +939,86 @@ export default function Dashboard({
     // Real row is only meaningful when both store and ads are connected.
     const showRealRow = hasStore && hasAds;
 
+    // ── Action language (PLANNING §12 principle 7) ─────────────────────────
+    // Each string gives a one-line interpretation of the metric's current state.
+    // Copy is dynamic: target hit/miss, delta sign, and anomaly state all feed in.
+
+    const heroRevenueAction = useMemo<string | undefined>(() => {
+        const d = storeDelta.revenue;
+        if (d === null) return undefined;
+        if (d > 5)  return `Up ${d.toFixed(1)}% vs prior period`;
+        if (d < -5) return `Down ${Math.abs(d).toFixed(1)}% vs prior period`;
+        return 'Flat vs prior period';
+    }, [storeDelta.revenue]);
+
+    const heroOrdersAction = useMemo<string | undefined>(() => {
+        const d = storeDelta.orders;
+        if (d === null) return undefined;
+        if (d > 5)  return `Up ${d.toFixed(1)}% vs prior period`;
+        if (d < -5) return `Down ${Math.abs(d).toFixed(1)}% vs prior period`;
+        return 'Flat vs prior period';
+    }, [storeDelta.orders]);
+
+    const realRoasAction = useMemo<{ line: string; href?: string } | undefined>(() => {
+        if (metrics.roas === null) return undefined;
+        const roasStr = `${metrics.roas.toFixed(2)}×`;
+        if (targets.roas !== null) {
+            const isAbove = metrics.roas >= targets.roas;
+            return isAbove
+                ? { line: `Holding at ${roasStr} — above target` }
+                : { line: `At ${roasStr} — below target`, href: wurl(workspace?.slug, '/campaigns') };
+        }
+        return { line: `${roasStr} blended ROAS`, href: wurl(workspace?.slug, '/campaigns') };
+    }, [metrics.roas, targets.roas, workspace?.slug]);
+
+    const marketingPctAction = useMemo<{ line: string; href?: string } | undefined>(() => {
+        if (metrics.marketing_spend_pct === null) return undefined;
+        const pctStr = `${metrics.marketing_spend_pct}%`;
+        if (targets.marketing_pct !== null) {
+            const isGood = metrics.marketing_spend_pct <= targets.marketing_pct;
+            return isGood
+                ? { line: `${pctStr} of revenue — within budget` }
+                : { line: `${pctStr} of revenue — over budget`, href: wurl(workspace?.slug, '/campaigns') };
+        }
+        return { line: `${pctStr} of revenue on ads` };
+    }, [metrics.marketing_spend_pct, targets.marketing_pct, workspace?.slug]);
+
+    const realCpoAction = useMemo<{ line: string; href?: string } | undefined>(() => {
+        if (metrics.cpo === null) return undefined;
+        const cpoStr = formatCurrency(metrics.cpo, currency);
+        if (targets.cpo !== null) {
+            const isGood = metrics.cpo <= targets.cpo;
+            return isGood
+                ? { line: `${cpoStr} per order — on target` }
+                : { line: `${cpoStr} per order — above target`, href: wurl(workspace?.slug, '/campaigns') };
+        }
+        return { line: `${cpoStr} per order` };
+    }, [metrics.cpo, targets.cpo, currency, workspace?.slug]);
+
+    const notTrackedAction = useMemo<{ line: string; href?: string } | undefined>(() => {
+        if (notTrackedPct === null) return undefined;
+        if (notTrackedIsNeg) {
+            return { line: 'Platforms over-reporting — see discrepancy', href: wurl(workspace?.slug, '/analytics/discrepancy') };
+        }
+        const pctStr = `${Math.abs(notTrackedPct).toFixed(1)}%`;
+        return {
+            line: `${pctStr} unattributed — improve tagging`,
+            href: wurl(workspace?.slug, '/acquisition'),
+        };
+    }, [notTrackedPct, notTrackedIsNeg, workspace?.slug]);
+
     return (
         <AppLayout dateRangePicker={<DateRangePicker />}>
             <Head title="Overview" />
+
+            {/* UTM coverage nudge modal — only when ads connected and coverage <50% */}
+            {hasAds && utm_coverage && (
+                <UtmCoverageNudgeModal
+                    coveragePct={utm_coverage.pct}
+                    coverageStatus={utm_coverage.status}
+                />
+            )}
+
             <PageHeader title="Overview" subtitle="Cross-channel command center" />
             <StoreFilter selectedStoreIds={store_ids} />
 
@@ -919,7 +1041,7 @@ export default function Dashboard({
             {/* AI daily summary */}
             {ai_summary && (
                 <div className="mb-4 rounded-xl border border-zinc-200 bg-white p-5">
-                    <div className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                    <div className="mb-2 flex items-center gap-1.5 section-label">
                         <Bot className="h-3.5 w-3.5" />
                         AI Daily Summary
                     </div>
@@ -935,6 +1057,8 @@ export default function Dashboard({
                     source="store"
                     change={storeDelta.revenue}
                     loading={navigating}
+                    tooltip="Completed and processing orders converted to your reporting currency."
+                    actionLine={heroRevenueAction}
                 />
                 <MetricCard
                     label="Orders"
@@ -942,6 +1066,7 @@ export default function Dashboard({
                     source="store"
                     change={storeDelta.orders}
                     loading={navigating}
+                    actionLine={heroOrdersAction}
                 />
                 <AttentionCard alert={top_alert} daysOfData={days_of_data} />
             </div>
@@ -951,7 +1076,7 @@ export default function Dashboard({
                 See: PLANNING.md "Daily average delta block" */}
             {daily_avg_delta && hasStore && (
                 <div className="mb-4 rounded-xl border border-zinc-200 bg-white px-4 py-3">
-                    <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                    <div className="mb-2 section-label">
                         Last 7 days vs prior 7 days
                     </div>
                     <div className="flex flex-wrap gap-6">
@@ -1016,8 +1141,8 @@ export default function Dashboard({
                     {/* Section label — one lightbulb for the whole group, not one per card */}
                     <div className="mb-2 flex items-center gap-1.5">
                         <Lightbulb className="h-3.5 w-3.5 text-amber-400" />
-                        <span className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
-                            Blended — store revenue vs ad spend, computed by Nexstage
+                        <span className="section-label">
+                            Blended — store revenue vs ad spend, cross-source estimate
                         </span>
                     </div>
                     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -1032,6 +1157,8 @@ export default function Dashboard({
                             trendDots={targets.roas != null ? trend_dots.roas : undefined}
                             loading={navigating}
                             tooltip="Store revenue ÷ total ad spend. Uses your actual orders, not platform pixel attribution. Blended across all connected ad platforms."
+                            actionLine={realRoasAction?.line}
+                            actionHref={realRoasAction?.href}
                         />
                         {/* Marketing % — trendDots: last 14 days hit/miss vs target */}
                         <MetricCard
@@ -1043,6 +1170,8 @@ export default function Dashboard({
                             trendDots={targets.marketing_pct != null ? trend_dots.marketing_pct : undefined}
                             loading={navigating}
                             tooltip="Ad spend as a percentage of revenue. Lower is better — a high marketing % means you're spending a large share of revenue on ads."
+                            actionLine={marketingPctAction?.line}
+                            actionHref={marketingPctAction?.href}
                         />
                         {/* Real CPO — trendDots: last 14 days hit/miss vs target */}
                         <MetricCard
@@ -1056,6 +1185,8 @@ export default function Dashboard({
                             trendDots={targets.cpo != null ? trend_dots.cpo : undefined}
                             loading={navigating}
                             tooltip="Total ad spend ÷ total store orders. Uses your actual order count, not platform-attributed conversions."
+                            actionLine={realCpoAction?.line}
+                            actionHref={realCpoAction?.href}
                         />
                         {/* Not Tracked % */}
                         <MetricCard
@@ -1063,6 +1194,8 @@ export default function Dashboard({
                             value={notTrackedPct != null ? `${notTrackedPct.toFixed(1)}%` : null}
                             loading={navigating}
                             tooltip={notTrackedTooltip}
+                            actionLine={notTrackedAction?.line}
+                            actionHref={notTrackedAction?.href}
                         />
                     </div>
                 </div>
@@ -1077,9 +1210,9 @@ export default function Dashboard({
                     icon={ShoppingBag}
                     color="bg-primary"
                     defaultOpen={hasStore}
-                    connectHref={!hasStore ? '/onboarding' : undefined}
+                    connectHref={!hasStore ? wurl(workspace?.slug, '/onboarding') : undefined}
                     connectMessage="Connect your store to track revenue, orders, and customers →"
-                    footer={recent_orders ? <LatestOrdersFeed feed={recent_orders} currency={currency} /> : undefined}
+                    footer={recent_orders ? <LatestOrdersFeed feed={recent_orders} currency={currency} workspaceSlug={workspace?.slug} /> : undefined}
                 >
                     <MetricCard
                         label="Revenue"
@@ -1087,6 +1220,7 @@ export default function Dashboard({
                         source="store"
                         change={storeDelta.revenue}
                         loading={navigating}
+                        tooltip="Completed and processing orders converted to your reporting currency."
                     />
                     <MetricCard
                         label="Orders"
@@ -1121,9 +1255,9 @@ export default function Dashboard({
                     defaultOpen={hasAds}
                     headerBadge={utm_coverage ? <UtmCoverageBadge coverage={utm_coverage} /> : undefined}
                     footer={utm_coverage?.unrecognized_sources?.length ? (
-                        <UnrecognizedSourcesBanner sources={utm_coverage.unrecognized_sources} />
+                        <UnrecognizedSourcesBanner sources={utm_coverage.unrecognized_sources} workspaceSlug={workspace?.slug} />
                     ) : undefined}
-                    connectHref={!hasAds ? '/settings/integrations' : undefined}
+                    connectHref={!hasAds ? wurl(workspace?.slug, '/settings/integrations') : undefined}
                     connectMessage="Connect Meta Ads or Google Ads to see cross-channel ROAS →"
                     advancedChildren={advanced_paid_metrics ? (
                         <>
@@ -1181,6 +1315,8 @@ export default function Dashboard({
                         change={paidDelta.roas}
                         loading={navigating}
                         tooltip="Store revenue ÷ ad spend. Calculated from your actual orders, not platform pixel attribution."
+                        actionLine={realRoasAction?.line}
+                        actionHref={realRoasAction?.href}
                     />
                     <MetricCard
                         label="Attributed Revenue"
@@ -1200,6 +1336,8 @@ export default function Dashboard({
                         invertTrend
                         loading={navigating}
                         tooltip="Cost Per Order. Total ad spend ÷ total store orders. Uses actual orders, not platform-attributed conversions."
+                        actionLine={realCpoAction?.line}
+                        actionHref={realCpoAction?.href}
                     />
                 </ChannelSection>
 
@@ -1209,7 +1347,7 @@ export default function Dashboard({
                     icon={TrendingUp}
                     color="bg-emerald-500"
                     defaultOpen={hasGsc}
-                    connectHref={!hasGsc ? '/settings/integrations' : undefined}
+                    connectHref={!hasGsc ? wurl(workspace?.slug, '/settings/integrations') : undefined}
                     connectMessage="Connect Google Search Console to track organic traffic →"
                 >
                     <MetricCard
@@ -1218,6 +1356,8 @@ export default function Dashboard({
                         source="gsc"
                         change={organicDelta.gsc_clicks}
                         loading={navigating}
+                        actionLine="View organic details"
+                        actionHref={wurl(workspace?.slug, '/seo')}
                     />
                     <MetricCard
                         label="Impressions"
@@ -1244,6 +1384,8 @@ export default function Dashboard({
                         change={organicDelta.not_tracked_revenue}
                         loading={navigating}
                         tooltip={notTrackedTooltip}
+                        actionLine={notTrackedAction?.line}
+                        actionHref={notTrackedAction?.href}
                     />
                 </ChannelSection>
 
@@ -1253,7 +1395,7 @@ export default function Dashboard({
                     icon={Gauge}
                     color="bg-violet-500"
                     defaultOpen={hasPsi}
-                    connectHref={!hasPsi ? '/settings/integrations' : undefined}
+                    connectHref={!hasPsi ? wurl(workspace?.slug, '/settings/integrations') : undefined}
                     connectMessage="Add a monitored URL to track Lighthouse scores →"
                 >
                     <MetricCard
@@ -1262,6 +1404,8 @@ export default function Dashboard({
                         source="site"
                         loading={navigating}
                         tooltip="Lighthouse Performance score (0–100) for your homepage. Mobile strategy, latest check."
+                        actionLine="View site performance"
+                        actionHref={wurl(workspace?.slug, '/performance')}
                     />
                     <MetricCard
                         label="LCP"
@@ -1365,7 +1509,7 @@ function DailyNotesSection({ notes }: { notes: NotePoint[] }) {
 
     return (
         <div className="mt-4 rounded-xl border border-zinc-200 bg-white p-5">
-            <div className="mb-4 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+            <div className="mb-4 flex items-center gap-1.5 section-label">
                 <NotebookPen className="h-3.5 w-3.5" />
                 Daily Notes
             </div>

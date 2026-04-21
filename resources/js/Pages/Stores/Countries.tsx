@@ -1,8 +1,10 @@
+import { useMemo, useState } from 'react';
 import { Head, usePage } from '@inertiajs/react';
 import AppLayout from '@/Components/layouts/AppLayout';
 import { StoreLayout } from '@/Components/layouts/StoreLayout';
 import type { StoreData } from '@/Components/layouts/StoreLayout';
 import { DateRangePicker } from '@/Components/shared/DateRangePicker';
+import { SortButton } from '@/Components/shared/SortButton';
 import { formatCurrency } from '@/lib/formatters';
 import type { PageProps } from '@/types';
 
@@ -38,9 +40,40 @@ interface Props extends PageProps {
     to: string;
 }
 
+type SortCol = 'country' | 'share' | 'revenue';
+
 export default function StoreCountries({ store, countries }: Props) {
     const { workspace } = usePage<PageProps>().props;
     const currency = workspace?.reporting_currency ?? 'EUR';
+
+    const [sortCol, setSortCol] = useState<SortCol>('revenue');
+    const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+
+    function handleSort(col: string) {
+        const c = col as SortCol;
+        if (sortCol === c) {
+            setSortDir(d => d === 'desc' ? 'asc' : 'desc');
+        } else {
+            setSortCol(c);
+            setSortDir('desc');
+        }
+    }
+
+    const sorted = useMemo(() => {
+        return [...countries].sort((a, b) => {
+            if (sortCol === 'country') {
+                const cmp = a.country_code.localeCompare(b.country_code);
+                return sortDir === 'asc' ? cmp : -cmp;
+            }
+            const aVal = sortCol === 'share' ? a.share : a.revenue;
+            const bVal = sortCol === 'share' ? b.share : b.revenue;
+            return sortDir === 'asc' ? aVal - bVal : bVal - aVal;
+        });
+    }, [countries, sortCol, sortDir]);
+
+    const sortBtn = (col: string, label: string) => (
+        <SortButton col={col} label={label} currentSort={sortCol} currentDir={sortDir} onSort={handleSort} />
+    );
 
     return (
         <AppLayout dateRangePicker={<DateRangePicker />}>
@@ -57,15 +90,15 @@ export default function StoreCountries({ store, countries }: Props) {
                     <div className="rounded-xl border border-zinc-200 bg-white overflow-hidden">
                         <table className="w-full text-sm">
                             <thead>
-                                <tr className="border-b border-zinc-100 bg-zinc-50 text-left">
-                                    <th className="px-4 py-3 font-medium text-zinc-400 w-10">#</th>
-                                    <th className="px-4 py-3 font-medium text-zinc-400">Country</th>
-                                    <th className="px-4 py-3 font-medium text-zinc-400 hidden sm:table-cell">Share</th>
-                                    <th className="px-4 py-3 font-medium text-zinc-400 text-right">Revenue</th>
+                                <tr className="border-b border-zinc-100 text-left th-label">
+                                    <th className="px-4 py-3 w-10">#</th>
+                                    <th className="px-4 py-3">{sortBtn('country', 'Country')}</th>
+                                    <th className="px-4 py-3 hidden sm:table-cell">{sortBtn('share', 'Share')}</th>
+                                    <th className="px-4 py-3 text-right">{sortBtn('revenue', 'Revenue')}</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-zinc-100">
-                                {countries.map((row, index) => {
+                                {sorted.map((row, index) => {
                                     const code = row.country_code.toUpperCase();
                                     return (
                                         <tr key={row.country_code} className="hover:bg-zinc-50 transition-colors">

@@ -20,6 +20,7 @@ use App\Services\Integrations\Google\GoogleAdsClient;
 use App\Services\WorkspaceContext;
 use Carbon\Carbon;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -33,7 +34,7 @@ use Throwable;
 /**
  * Syncs ad insights for a single ad account (Facebook or Google).
  *
- * Queue:   default
+ * Queue:   sync-facebook | sync-google-ads (per $platform)
  * Timeout: 300 s
  * Tries:   3
  * Backoff: [60, 300, 900] s (default)
@@ -47,23 +48,38 @@ use Throwable;
  *
  * Dispatched hourly per active ad account via schedule closure in console.php.
  * Also dispatched immediately after a new ad account is connected.
+ *
+ * @see PLANNING.md section 22
  */
-class SyncAdInsightsJob implements ShouldQueue
+class SyncAdInsightsJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
     use SyncsAdInsights;
 
-    public int $timeout = 300;
-    public int $tries   = 3;
+    public int $timeout    = 300;
+    public int $tries      = 3;
+    public int $uniqueFor  = 330; // seconds; slightly longer than timeout so lock outlives the job
 
     /** @var array<int, int> */
     public array $backoff = [60, 300, 900];
 
+    public function uniqueId(): string
+    {
+        return "{$this->adAccountId}:{$this->platform}";
+    }
+
     public function __construct(
         private readonly int $adAccountId,
         private readonly int $workspaceId,
+        private readonly string $platform = 'facebook',
     ) {
-        $this->onQueue('default');
+        // Route to provider-specific queue so a rate-limited FB job cannot block Google Ads sync.
+        // See PLANNING.md section 22.1.
+        $queue = match ($this->platform) {
+            'google'   => 'sync-google-ads',
+            default    => 'sync-facebook',
+        };
+        $this->onQueue($queue);
     }
 
     public function handle(FxRateService $fxRates): void
@@ -117,18 +133,23 @@ class SyncAdInsightsJob implements ShouldQueue
             return;
         }
 
-        $syncLog = SyncLog::create([
-            'workspace_id'      => $this->workspaceId,
-            'syncable_type'     => AdAccount::class,
-            'syncable_id'       => $this->adAccountId,
-            'job_type'          => self::class,
-            'status'            => 'running',
-            'started_at'        => now(),
-            'queue'             => 'default',
-            'attempt'           => $this->attempts(),
-        ]);
+        // Initialise to null so catch blocks can use ?-> if SyncLog::create() itself throws
+        // (e.g. DB unreachable). The finally block releases the lock in all cases.
+        $syncLog = null;
 
         try {
+            $syncLog = SyncLog::create([
+                'workspace_id'      => $this->workspaceId,
+                'syncable_type'     => AdAccount::class,
+                'syncable_id'       => $this->adAccountId,
+                'job_type'          => self::class,
+                'status'            => 'running',
+                'started_at'        => now(),
+                'queue'             => $this->queue,
+                'attempt'           => $this->attempts(),
+                'timeout_seconds'   => $this->timeout,
+            ]);
+
             $recordsProcessed = match ($account->platform) {
                 'facebook' => $this->syncFacebook($account, $fxRates),
                 'google'   => $this->syncGoogle($account, $fxRates),
@@ -153,7 +174,7 @@ class SyncAdInsightsJob implements ShouldQueue
             // Close the sync log so it doesn't stay stuck at 'running'
             $usageStr = $e instanceof FacebookRateLimitException && $e->usagePct !== null
                 ? " (usage: {$e->usagePct}%)" : '';
-            $syncLog->update([
+            $syncLog?->update([
                 'status'           => 'failed',
                 'error_message'    => "Rate limited — retrying after {$e->retryAfter}s{$usageStr}",
                 'completed_at'     => now(),
@@ -163,9 +184,9 @@ class SyncAdInsightsJob implements ShouldQueue
             // exhaust tries=3 and trigger failed() with MaxAttemptsExceededException, which
             // falsely increments consecutive_sync_failures. Dispatching a fresh job resets
             // the attempt counter so rate limits never pollute the failure health check.
-            self::dispatch($this->adAccountId, $this->workspaceId)
-                ->delay(now()->addSeconds($e->retryAfter))
-                ->onQueue('default');
+            // Preserve the same provider queue so a re-queued FB job stays on sync-facebook.
+            self::dispatch($this->adAccountId, $this->workspaceId, $this->platform)
+                ->delay(now()->addSeconds($e->retryAfter));
             $this->delete();
             return;
         } catch (FacebookTokenExpiredException | GoogleTokenExpiredException $e) {
@@ -177,7 +198,9 @@ class SyncAdInsightsJob implements ShouldQueue
             $this->fail($e);
             return;
         } catch (Throwable $e) {
-            $this->handleSyncFailure($account, $syncLog, $e);
+            if ($syncLog !== null) {
+                $this->handleSyncFailure($account, $syncLog, $e);
+            }
             throw $e;
         } finally {
             $lock->release();
@@ -347,7 +370,7 @@ class SyncAdInsightsJob implements ShouldQueue
         ]);
     }
 
-    private function markTokenExpired(AdAccount $account, SyncLog $syncLog, Throwable $e): void
+    private function markTokenExpired(AdAccount $account, ?SyncLog $syncLog, Throwable $e): void
     {
         $account->update(['status' => 'token_expired']);
 
@@ -359,7 +382,7 @@ class SyncAdInsightsJob implements ShouldQueue
             'data'          => ['ad_account_name' => $account->name],
         ]);
 
-        $syncLog->update([
+        $syncLog?->update([
             'status'           => 'failed',
             'error_message'    => $e->getMessage(),
             'completed_at'     => now(),
@@ -372,7 +395,7 @@ class SyncAdInsightsJob implements ShouldQueue
         ]);
     }
 
-    private function markAccountDisabled(AdAccount $account, SyncLog $syncLog, Throwable $e): void
+    private function markAccountDisabled(AdAccount $account, ?SyncLog $syncLog, Throwable $e): void
     {
         $account->update(['status' => 'disabled']);
 
@@ -387,7 +410,7 @@ class SyncAdInsightsJob implements ShouldQueue
             ],
         ]);
 
-        $syncLog->update([
+        $syncLog?->update([
             'status'           => 'failed',
             'error_message'    => $e->getMessage(),
             'completed_at'     => now(),

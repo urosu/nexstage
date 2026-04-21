@@ -4,16 +4,19 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
-use App\Models\AdAccount;
 use App\Models\AiSummary;
 use App\Models\Alert;
 use App\Models\DailyNote;
-use App\Models\Store;
+use App\Models\Workspace;
+use App\Services\MonthlyReportService;
 use App\Services\WorkspaceContext;
+use Barryvdh\DomPDF\Facade\Pdf;
+use Carbon\CarbonImmutable;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
+use Symfony\Component\HttpFoundation\Response as SymfonyResponse;
 
 class InsightsController extends Controller
 {
@@ -23,12 +26,12 @@ class InsightsController extends Controller
 
         $validated = $request->validate([
             'severity' => 'nullable|string|in:all,info,warning,critical',
-            'status'   => 'nullable|string|in:all,unread,unresolved',
-            'page'     => 'nullable|integer|min:1',
+            'status' => 'nullable|string|in:all,unread,unresolved',
+            'page' => 'nullable|integer|min:1',
         ]);
 
         $severity = $validated['severity'] ?? 'all';
-        $status   = $validated['status']   ?? 'all';
+        $status = $validated['status'] ?? 'all';
 
         // AI summaries — last 7 days, latest first
         $aiSummaries = AiSummary::withoutGlobalScopes()
@@ -38,10 +41,10 @@ class InsightsController extends Controller
             ->orderByDesc('date')
             ->get()
             ->map(fn ($s) => [
-                'id'           => $s->id,
-                'date'         => $s->date->toDateString(),
+                'id' => $s->id,
+                'date' => $s->date->toDateString(),
                 'summary_text' => $s->summary_text,
-                'model_used'   => $s->model_used,
+                'model_used' => $s->model_used,
                 'generated_at' => $s->generated_at->toISOString(),
             ]);
 
@@ -55,7 +58,7 @@ class InsightsController extends Controller
             ->orderByDesc('date')
             ->get()
             ->map(fn ($n) => [
-                'id'   => $n->id,
+                'id' => $n->id,
                 'date' => $n->date->toDateString(),
                 'note' => $n->note,
             ]);
@@ -74,32 +77,69 @@ class InsightsController extends Controller
         }
 
         match ($status) {
-            'unread'     => $query->whereNull('read_at'),
+            'unread' => $query->whereNull('read_at'),
             'unresolved' => $query->whereNull('resolved_at'),
-            default      => null,
+            default => null,
         };
 
         $alerts = $query->paginate(30)->through(fn ($a) => [
-            'id'              => $a->id,
-            'type'            => $a->type,
-            'severity'        => $a->severity,
-            'store_name'      => $a->store?->name,
+            'id' => $a->id,
+            'type' => $a->type,
+            'severity' => $a->severity,
+            'store_name' => $a->store?->name,
             'ad_account_name' => $a->adAccount?->name,
-            'data'            => $a->data,
-            'read_at'         => $a->read_at?->toISOString(),
-            'resolved_at'     => $a->resolved_at?->toISOString(),
-            'created_at'      => $a->created_at->toISOString(),
+            'data' => $a->data,
+            'read_at' => $a->read_at?->toISOString(),
+            'resolved_at' => $a->resolved_at?->toISOString(),
+            'created_at' => $a->created_at->toISOString(),
         ]);
+
+        // Monthly report options — expose the last 6 complete months so users
+        // can download past PDFs on demand from the Insights page.
+        $reportMonths = [];
+        $cursor = CarbonImmutable::now()->startOfMonth()->subMonth();
+        for ($i = 0; $i < 6; $i++) {
+            $reportMonths[] = [
+                'year' => (int) $cursor->format('Y'),
+                'month' => (int) $cursor->format('n'),
+                'label' => $cursor->format('F Y'),
+            ];
+            $cursor = $cursor->subMonth();
+        }
 
         return Inertia::render('Insights', [
             'ai_summaries' => $aiSummaries,
-            'daily_notes'  => $dailyNotes,
-            'alerts'       => $alerts,
-            'filters'      => [
+            'daily_notes' => $dailyNotes,
+            'alerts' => $alerts,
+            'report_months' => $reportMonths,
+            'filters' => [
                 'severity' => $severity,
-                'status'   => $status,
+                'status' => $status,
             ],
         ]);
+    }
+
+    /**
+     * On-demand monthly PDF report. Renders the same blade template as
+     * GenerateMonthlyReportJob and streams it back as an inline download.
+     */
+    public function downloadMonthlyReport(
+        int $year,
+        int $month,
+        MonthlyReportService $service,
+    ): SymfonyResponse {
+        // Use WorkspaceContext rather than implicit Workspace model binding —
+        // SetActiveWorkspace calls forgetParameter('workspace') before SubstituteBindings runs.
+        $workspaceId = app(WorkspaceContext::class)->id();
+
+        $monthStart = CarbonImmutable::createFromDate($year, $month, 1)->startOfMonth();
+        $data = $service->build($workspaceId, $monthStart);
+
+        $filename = sprintf('nexstage-monthly-%s.pdf', $monthStart->format('Y-m'));
+
+        return Pdf::loadView('reports.monthly', $data)
+            ->setPaper('a4')
+            ->download($filename);
     }
 
     public function dismiss(int $alert): RedirectResponse
@@ -114,7 +154,7 @@ class InsightsController extends Controller
             ->whereNull('resolved_at')
             ->update([
                 'resolved_at' => now(),
-                'read_at'     => now(),
+                'read_at' => now(),
             ]);
 
         return back();
@@ -129,7 +169,7 @@ class InsightsController extends Controller
             ->whereNull('resolved_at')
             ->update([
                 'resolved_at' => now(),
-                'read_at'     => now(),
+                'read_at' => now(),
             ]);
 
         return back();

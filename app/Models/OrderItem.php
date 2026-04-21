@@ -23,14 +23,18 @@ class OrderItem extends Model
         'sku',
         'quantity',
         'unit_price',
+        'unit_cost',
+        'discount_amount',
         'line_total',
     ];
 
     protected function casts(): array
     {
         return [
-            'unit_price' => 'decimal:4',
-            'line_total' => 'decimal:4',
+            'unit_price'      => 'decimal:4',
+            'unit_cost'       => 'decimal:4',
+            'discount_amount' => 'decimal:4',
+            'line_total'      => 'decimal:4',
         ];
     }
 

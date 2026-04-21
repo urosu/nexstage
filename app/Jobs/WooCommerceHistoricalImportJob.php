@@ -24,7 +24,7 @@ use Illuminate\Support\Facades\Log;
 /**
  * Imports the full order history for a WooCommerce store.
  *
- * Queue:   import
+ * Queue:   imports
  * Timeout: 7200 s (2 hours)
  * Tries:   3
  * Backoff: default [60, 300, 900] s
@@ -73,7 +73,7 @@ class WooCommerceHistoricalImportJob implements ShouldQueue
         private readonly int  $workspaceId,
         private ?int          $syncLogId = null,
     ) {
-        $this->onQueue('import');
+        $this->onQueue('imports');
     }
 
     public function handle(UpsertWooCommerceOrderAction $action): void
@@ -439,12 +439,13 @@ class WooCommerceHistoricalImportJob implements ShouldQueue
         }
 
         return SyncLog::create([
-            'workspace_id'  => $this->workspaceId,
-            'syncable_type' => $syncableType,
-            'syncable_id'   => $syncableId,
-            'job_type'      => self::class,
-            'queue'         => 'import',
-            'attempt'       => $this->attempts(),
+            'workspace_id'    => $this->workspaceId,
+            'syncable_type'   => $syncableType,
+            'syncable_id'     => $syncableId,
+            'job_type'        => self::class,
+            'queue'           => $this->queue,
+            'attempt'         => $this->attempts(),
+            'timeout_seconds' => $this->timeout,
             ...$fields,
         ]);
     }

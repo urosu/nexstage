@@ -13,6 +13,7 @@ use App\Models\Workspace;
 use App\Services\Integrations\WooCommerce\WooCommerceConnector;
 use App\Services\WorkspaceContext;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -23,7 +24,7 @@ use Illuminate\Support\Facades\Log;
 /**
  * Hourly fallback sync for a single WooCommerce store.
  *
- * Queue:   default
+ * Queue:   sync-store
  * Timeout: 120 s
  * Tries:   3
  * Backoff: [60, 300, 900] s (default)
@@ -43,19 +44,25 @@ use Illuminate\Support\Facades\Log;
  *
  * Related: app/Services/Integrations/WooCommerce/WooCommerceConnector.php
  */
-class SyncStoreOrdersJob implements ShouldQueue
+class SyncStoreOrdersJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 120;
-    public int $tries   = 3;
+    public int $timeout   = 120;
+    public int $tries     = 3;
+    public int $uniqueFor = 150;
+
+    public function uniqueId(): string
+    {
+        return (string) $this->storeId;
+    }
 
     public function __construct(
         private readonly int  $storeId,
         private readonly int  $workspaceId,
         private readonly bool $force = false,
     ) {
-        $this->onQueue('default');
+        $this->onQueue('sync-store');
     }
 
     public function handle(): void
@@ -88,12 +95,13 @@ class SyncStoreOrdersJob implements ShouldQueue
             'workspace_id'      => $this->workspaceId,
             'syncable_type'     => Store::class,
             'syncable_id'       => $this->storeId,
-            'job_type'          => 'SyncStoreOrdersJob',
+            'job_type'          => self::class,
             'status'            => 'running',
             'records_processed' => 0,
             'started_at'        => now(),
-            'queue'             => 'default',
+            'queue'             => $this->queue,
             'attempt'           => $this->attempts(),
+            'timeout_seconds'   => $this->timeout,
         ]);
 
         try {
@@ -111,8 +119,18 @@ class SyncStoreOrdersJob implements ShouldQueue
             $store->update(['last_synced_at' => now()]);
             $this->onSuccess($store);
         } catch (WooCommerceRateLimitException $e) {
-            // Re-queue without consuming a retry attempt.
-            $this->release($e->retryAfter);
+            // Why: release() increments the attempt counter, so 3 rate-limit hits exhaust
+            // tries=3 and trigger failed(), falsely incrementing consecutive_sync_failures.
+            // Dispatching a fresh job resets the counter so rate limits never pollute store health.
+            $syncLog->update([
+                'status'           => 'failed',
+                'error_message'    => "Rate limited — retrying after {$e->retryAfter}s",
+                'completed_at'     => now(),
+                'duration_seconds' => (int) max(0, (int) now()->diffInSeconds($syncLog->started_at)),
+            ]);
+            self::dispatch($this->storeId, $this->workspaceId)
+                ->delay(now()->addSeconds($e->retryAfter));
+            $this->delete();
             return;
         } catch (\Throwable $e) {
             $syncLog->update([
@@ -145,6 +163,7 @@ class SyncStoreOrdersJob implements ShouldQueue
                 ->where('syncable_type', Store::class)
                 ->where('syncable_id', $this->storeId)
                 ->where('workspace_id', $this->workspaceId)
+                ->where('job_type', self::class)
                 ->where('status', 'running')
                 ->update([
                     'status'        => 'failed',

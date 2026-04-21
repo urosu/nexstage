@@ -29,14 +29,14 @@ class StoreWebhook extends Model
         'workspace_id',
         'platform_webhook_id',
         'topic',
+        'last_successful_delivery_at',
         'created_at',
     ];
-
-    protected $dates = ['deleted_at'];
 
     protected function casts(): array
     {
         return [
+            'last_successful_delivery_at' => 'datetime',
             'created_at' => 'datetime',
             'deleted_at' => 'datetime',
         ];

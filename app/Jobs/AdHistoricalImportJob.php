@@ -32,7 +32,7 @@ use Throwable;
 /**
  * Imports the full ad insights history for a Facebook or Google Ads account.
  *
- * Queue:   low
+ * Queue:   imports
  * Timeout: 7200 s (2 hours)
  * Tries:   5
  * Backoff: default [60, 300, 900] s
@@ -75,7 +75,7 @@ class AdHistoricalImportJob implements ShouldQueue
         ?int $syncLogId = null,
     ) {
         $this->syncLogId = $syncLogId;
-        $this->onQueue('low');
+        $this->onQueue('imports');
     }
 
     public function handle(FxRateService $fxRates): void
@@ -728,12 +728,13 @@ class AdHistoricalImportJob implements ShouldQueue
         }
 
         return SyncLog::create([
-            'workspace_id'  => $this->workspaceId,
-            'syncable_type' => $syncableType,
-            'syncable_id'   => $syncableId,
-            'job_type'      => self::class,
-            'queue'         => 'low',
-            'attempt'       => $this->attempts(),
+            'workspace_id'    => $this->workspaceId,
+            'syncable_type'   => $syncableType,
+            'syncable_id'     => $syncableId,
+            'job_type'        => self::class,
+            'queue'           => $this->queue,
+            'attempt'         => $this->attempts(),
+            'timeout_seconds' => $this->timeout,
             ...$fields,
         ]);
     }

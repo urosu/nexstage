@@ -11,10 +11,12 @@ use App\Models\AdInsight;
 use App\Models\Adset;
 use App\Models\Campaign;
 use App\Models\Workspace;
+use App\Services\CampaignNameParserService;
 use App\Services\Fx\FxRateService;
 use App\Services\Integrations\Facebook\FacebookAdsClient;
 use App\Services\Integrations\Google\GoogleAdsClient;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -64,7 +66,7 @@ trait SyncsAdInsights
                 ? $rawTargetCost / 100
                 : null;
 
-            Campaign::withoutGlobalScopes()->updateOrCreate(
+            $campaign = Campaign::withoutGlobalScopes()->updateOrCreate(
                 ['ad_account_id' => $account->id, 'external_id' => (string) $row['id']],
                 [
                     'workspace_id'    => $workspaceId,
@@ -78,6 +80,8 @@ trait SyncsAdInsights
                     'target_value'    => $targetValue,
                 ]
             );
+
+            app(CampaignNameParserService::class)->parseAndSave($campaign);
         }
 
         // Adsets — keyed by external campaign_id so we can resolve the internal campaign FK
@@ -207,7 +211,7 @@ trait SyncsAdInsights
                 $targetValue = $targetRoas;
             }
 
-            Campaign::withoutGlobalScopes()->updateOrCreate(
+            $campaignModel = Campaign::withoutGlobalScopes()->updateOrCreate(
                 ['ad_account_id' => $account->id, 'external_id' => $external],
                 [
                     'workspace_id'    => $this->workspaceId,
@@ -225,6 +229,8 @@ trait SyncsAdInsights
                     'target_value'    => $targetValue,
                 ]
             );
+
+            app(CampaignNameParserService::class)->parseAndSave($campaignModel);
         }
     }
 
@@ -235,8 +241,10 @@ trait SyncsAdInsights
     /**
      * Map Facebook Ads Insights API rows to ad_insights and upsert.
      *
-     * Partial indexes on ad_insights require per-row updateOrCreate rather than
-     * bulk upsert(), since Laravel's upsert() cannot target PostgreSQL partial indexes.
+     * Builds a batch array of all valid rows and upserts them in a single
+     * INSERT … ON CONFLICT ON CONSTRAINT … DO UPDATE statement.
+     * This replaces the previous per-row updateOrCreate() pattern which fired
+     * SELECT + INSERT/UPDATE per row — a bottleneck on historical imports.
      *
      * FK maps are built lazily: only the maps required for the given level are
      * queried, saving 1–2 DB queries per call for campaign-level and adset-level calls.
@@ -280,7 +288,8 @@ trait SyncsAdInsights
                 ->pluck('id', 'external_id')
             : collect();
 
-        $count = 0;
+        $now   = now()->toDateTimeString();
+        $batch = [];
 
         foreach ($rows as $row) {
             $date     = Carbon::parse((string) $row['date_start']);
@@ -288,8 +297,7 @@ trait SyncsAdInsights
             $currency = strtoupper((string) ($row['account_currency'] ?? $account->currency));
 
             // FX conversion (DB-first; NULL on missing rate).
-            // RetryMissingConversionJob back-fills spend_in_reporting_currency nightly
-            // for any rows where the rate was unavailable at sync time.
+            // RetryMissingConversionJob back-fills spend_in_reporting_currency nightly.
             $spendConverted = null;
             try {
                 $spendConverted = $fxRates->convert($spend, $currency, $reportingCurrency, $date);
@@ -303,8 +311,7 @@ trait SyncsAdInsights
                 ]);
             }
 
-            // Resolve FKs — log when a lookup misses so sync gaps are visible in logs
-            // rather than silently skipping rows and leaving the dataset incomplete.
+            // Resolve FKs — log when a lookup misses so sync gaps are visible in logs.
             $campaignId = null;
             if (isset($row['campaign_id'])) {
                 $campaignId = $campaignMap[(string) $row['campaign_id']] ?? null;
@@ -344,46 +351,18 @@ trait SyncsAdInsights
                 }
             }
 
-            // Build the unique-key conditions that match the partial index.
-            // Each level has its own partial unique index (ai_campaign_daily_unique,
-            // ai_adset_daily_unique, ai_ad_daily_unique) that the updateOrCreate target must match.
-            $uniqueKeys = match ($level) {
-                'campaign' => [
-                    'level'       => 'campaign',
-                    'campaign_id' => $campaignId,
-                    'date'        => $date->toDateString(),
-                    'hour'        => null,
-                ],
-                'adset' => [
-                    'level'    => 'adset',
-                    'adset_id' => $adsetId,
-                    'date'     => $date->toDateString(),
-                    'hour'     => null,
-                ],
-                'ad' => [
-                    'level'  => 'ad',
-                    'ad_id'  => $adId,
-                    'date'   => $date->toDateString(),
-                    'hour'   => null,
-                ],
-                default => [],
-            };
-
-            if (empty($uniqueKeys) || ($level === 'campaign' && $campaignId === null)) {
+            // Skip rows where the required FK for this level is missing.
+            if ($level === 'campaign' && $campaignId === null) {
                 continue;
             }
-
             if ($level === 'adset' && $adsetId === null) {
                 continue;
             }
-
             if ($level === 'ad' && $adId === null) {
                 continue;
             }
 
-            // Build raw_insights JSONB: store actions/action_values arrays for non-promoted
-            // action types. Platform_conversions/value are promoted to columns; the rest
-            // (video views, link clicks by type, etc.) stay here for future analysis.
+            // Build raw_insights JSONB.
             // See PLANNING.md "ad_insights.raw_insights"
             $rawInsights = null;
             if (isset($row['actions']) || isset($row['action_values'])) {
@@ -396,41 +375,109 @@ trait SyncsAdInsights
                 }
             }
 
-            AdInsight::withoutGlobalScopes()->updateOrCreate(
-                $uniqueKeys,
-                [
-                    'workspace_id'                => $this->workspaceId,
-                    'ad_account_id'               => $account->id,
-                    // Why: constraint ad_insights_level_fk_check enforces:
-                    //   campaign rows: campaign_id NOT NULL, ad_id NULL
-                    //   adset rows:    adset_id NOT NULL, campaign_id NULL, ad_id NULL
-                    //   ad rows:       ad_id NOT NULL, campaign_id NULL
-                    // adset_id is stored on ad-level rows as a cross-reference (no constraint violation
-                    // since the FK only requires non-null, not exclusively set).
-                    'campaign_id'                 => $level === 'campaign' ? $campaignId : null,
-                    'adset_id'                    => $level === 'ad' ? $adsetId : ($level === 'adset' ? $adsetId : null),
-                    'ad_id'                       => $level === 'ad' ? $adId : null,
-                    'spend'                       => $spend,
-                    'spend_in_reporting_currency' => $spendConverted,
-                    'impressions'                 => (int) ($row['impressions'] ?? 0),
-                    'clicks'                      => (int) ($row['clicks'] ?? 0),
-                    'reach'                       => isset($row['reach']) ? (int) $row['reach'] : null,
-                    'frequency'                   => isset($row['frequency']) ? (float) $row['frequency'] : null,
-                    'platform_conversions'        => $this->extractPurchaseConversions($row),
-                    'platform_conversions_value'  => $this->extractPurchaseConversionsValue($row),
-                    'search_impression_share'     => null,  // Facebook-only, not available via Insights API
-                    'platform_roas'               => $this->extractRoas($row),
-                    'currency'                    => $currency,
-                    'raw_insights'                => $rawInsights,
-                    'raw_insights_api_version'    => $rawInsights !== null ? 'v25.0' : null,
-                    // ctr/cpc not stored — computed on the fly with NULLIF. See PLANNING.md "ad_insights"
-                ]
-            );
-
-            $count++;
+            $batch[] = [
+                'workspace_id'                => $this->workspaceId,
+                'ad_account_id'               => $account->id,
+                'level'                       => $level,
+                // Constraint ad_insights_level_fk_check enforces:
+                //   campaign: campaign_id NOT NULL, ad_id NULL
+                //   adset:    adset_id NOT NULL, campaign_id NULL, ad_id NULL
+                //   ad:       ad_id NOT NULL, campaign_id NULL
+                'campaign_id'                 => $level === 'campaign' ? $campaignId : null,
+                'adset_id'                    => $level === 'ad' ? $adsetId : ($level === 'adset' ? $adsetId : null),
+                'ad_id'                       => $level === 'ad' ? $adId : null,
+                'date'                        => $date->toDateString(),
+                'hour'                        => null,
+                'spend'                       => $spend,
+                'spend_in_reporting_currency' => $spendConverted,
+                'impressions'                 => (int) ($row['impressions'] ?? 0),
+                'clicks'                      => (int) ($row['clicks'] ?? 0),
+                'reach'                       => isset($row['reach']) ? (int) $row['reach'] : null,
+                'frequency'                   => isset($row['frequency']) ? (float) $row['frequency'] : null,
+                'platform_conversions'        => $this->extractPurchaseConversions($row),
+                'platform_conversions_value'  => $this->extractPurchaseConversionsValue($row),
+                'search_impression_share'     => null,
+                'platform_roas'               => $this->extractRoas($row),
+                'currency'                    => $currency,
+                'raw_insights'                => $rawInsights !== null ? json_encode($rawInsights) : null,
+                'raw_insights_api_version'    => $rawInsights !== null ? 'v25.0' : null,
+                'created_at'                  => $now,
+                'updated_at'                  => $now,
+            ];
         }
 
-        return $count;
+        if (empty($batch)) {
+            return 0;
+        }
+
+        $this->batchUpsertAdInsights($batch, $level);
+
+        return count($batch);
+    }
+
+    /**
+     * Execute a single INSERT … ON CONFLICT … DO UPDATE for a batch of ad_insights rows.
+     *
+     * Uses the inline partial-index conflict target (column list + WHERE predicate) instead
+     * of ON CONFLICT ON CONSTRAINT, because the unique indexes are created as named indexes
+     * (CREATE UNIQUE INDEX) rather than named constraints (ADD CONSTRAINT … UNIQUE). Postgres
+     * only accepts ON CONFLICT ON CONSTRAINT for the latter.
+     *
+     * Conflict targets mirror the partial unique index definitions exactly:
+     *   campaign: (campaign_id, date) WHERE level = 'campaign' AND hour IS NULL
+     *   adset:    (adset_id,   date) WHERE level = 'adset'    AND hour IS NULL
+     *   ad:       (ad_id,      date) WHERE level = 'ad'       AND hour IS NULL
+     *
+     * @param list<array<string, mixed>> $batch
+     */
+    private function batchUpsertAdInsights(array $batch, string $level): void
+    {
+        $conflictTarget = match ($level) {
+            'campaign' => "(campaign_id, date) WHERE level = 'campaign' AND hour IS NULL",
+            'adset'    => "(adset_id, date) WHERE level = 'adset' AND hour IS NULL",
+            'ad'       => "(ad_id, date) WHERE level = 'ad' AND hour IS NULL",
+            default    => throw new \InvalidArgumentException("Unknown level: {$level}"),
+        };
+
+        $columns = [
+            'workspace_id', 'ad_account_id', 'level',
+            'campaign_id', 'adset_id', 'ad_id',
+            'date', 'hour',
+            'spend', 'spend_in_reporting_currency',
+            'impressions', 'clicks', 'reach', 'frequency',
+            'platform_conversions', 'platform_conversions_value',
+            'search_impression_share', 'platform_roas',
+            'currency', 'raw_insights', 'raw_insights_api_version',
+            'created_at', 'updated_at',
+        ];
+
+        $placeholderGroup = '(' . implode(', ', array_fill(0, count($columns), '?')) . ')';
+        $placeholders     = implode(', ', array_fill(0, count($batch), $placeholderGroup));
+
+        $updateSet = implode(', ', array_map(
+            fn (string $col) => "{$col} = EXCLUDED.{$col}",
+            ['workspace_id', 'ad_account_id', 'spend', 'spend_in_reporting_currency',
+             'impressions', 'clicks', 'reach', 'frequency',
+             'platform_conversions', 'platform_conversions_value',
+             'search_impression_share', 'platform_roas',
+             'currency', 'raw_insights', 'raw_insights_api_version', 'updated_at'],
+        ));
+
+        $columnList = implode(', ', $columns);
+        $bindings   = [];
+
+        foreach ($batch as $row) {
+            foreach ($columns as $col) {
+                $bindings[] = $row[$col] ?? null;
+            }
+        }
+
+        DB::statement("
+            INSERT INTO ad_insights ({$columnList})
+            VALUES {$placeholders}
+            ON CONFLICT {$conflictTarget}
+            DO UPDATE SET {$updateSet}
+        ", $bindings);
     }
 
     // -------------------------------------------------------------------------
@@ -445,6 +492,8 @@ trait SyncsAdInsights
      *   - hour is always NULL (Google has no hourly data)
      *   - reach and platform_roas are always NULL
      *   - spend = metrics.cost_micros ÷ 1,000,000
+     *
+     * Batches all rows into a single INSERT … ON CONFLICT … DO UPDATE.
      *
      * @param  list<array<string, mixed>> $rows
      */
@@ -464,7 +513,8 @@ trait SyncsAdInsights
             ->where('ad_account_id', $account->id)
             ->pluck('id', 'external_id');
 
-        $count = 0;
+        $now   = now()->toDateTimeString();
+        $batch = [];
 
         foreach ($rows as $row) {
             $campaign = $row['campaign'] ?? [];
@@ -506,39 +556,40 @@ trait SyncsAdInsights
                 ? (float) $metrics['searchImpressionShare']
                 : null;
 
-            AdInsight::withoutGlobalScopes()->updateOrCreate(
-                [
-                    'level'       => 'campaign',
-                    'campaign_id' => $campaignId,
-                    'date'        => $dateStr,
-                    'hour'        => null,
-                ],
-                [
-                    'workspace_id'                => $this->workspaceId,
-                    'ad_account_id'               => $account->id,
-                    'adset_id'                    => null,
-                    'ad_id'                       => null,
-                    'spend'                       => $spend,
-                    'spend_in_reporting_currency' => $spendConverted,
-                    'impressions'                 => (int) ($metrics['impressions'] ?? 0),
-                    'clicks'                      => (int) ($metrics['clicks'] ?? 0),
-                    'reach'                       => null,  // not available in Google Ads
-                    'frequency'                   => null,  // Facebook-only metric
-                    'platform_conversions'        => isset($metrics['conversions']) ? (float) $metrics['conversions'] : null,
-                    'platform_conversions_value'  => null,  // not available at campaign level without conversion actions
-                    'search_impression_share'     => $searchImpressionShare,
-                    'platform_roas'               => null,  // not available in Google Ads
-                    'currency'                    => $currency,
-                    'raw_insights'                => null,  // Google Ads has no actions array
-                    'raw_insights_api_version'    => null,
-                    // ctr/cpc not stored — computed on the fly with NULLIF. See PLANNING.md "ad_insights"
-                ]
-            );
-
-            $count++;
+            $batch[] = [
+                'workspace_id'                => $this->workspaceId,
+                'ad_account_id'               => $account->id,
+                'level'                       => 'campaign',
+                'campaign_id'                 => $campaignId,
+                'adset_id'                    => null,
+                'ad_id'                       => null,
+                'date'                        => $dateStr,
+                'hour'                        => null,
+                'spend'                       => $spend,
+                'spend_in_reporting_currency' => $spendConverted,
+                'impressions'                 => (int) ($metrics['impressions'] ?? 0),
+                'clicks'                      => (int) ($metrics['clicks'] ?? 0),
+                'reach'                       => null,
+                'frequency'                   => null,
+                'platform_conversions'        => isset($metrics['conversions']) ? (float) $metrics['conversions'] : null,
+                'platform_conversions_value'  => null,
+                'search_impression_share'     => $searchImpressionShare,
+                'platform_roas'               => null,
+                'currency'                    => $currency,
+                'raw_insights'                => null,
+                'raw_insights_api_version'    => null,
+                'created_at'                  => $now,
+                'updated_at'                  => $now,
+            ];
         }
 
-        return $count;
+        if (empty($batch)) {
+            return 0;
+        }
+
+        $this->batchUpsertAdInsights($batch, 'campaign');
+
+        return count($batch);
     }
 
     // -------------------------------------------------------------------------

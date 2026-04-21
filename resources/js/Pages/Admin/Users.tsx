@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { Head, Link, router } from '@inertiajs/react';
+
+// Why: When Inertia swaps components via flushSync mid-navigation, the new component
+// initialises with useState(false) and renders stale cached data before the real server
+// response arrives. Tracking navigation state at module level lets us start with
+// navigating=true so the skeleton stays visible until the real data is ready.
+let _inertiaNavigating = false;
+router.on('start',  () => { _inertiaNavigating = true; });
+router.on('finish', () => { _inertiaNavigating = false; });
+
 import { Users, ShieldAlert, UserCheck } from 'lucide-react';
 import AppLayout from '@/Components/layouts/AppLayout';
 import { PageHeader } from '@/Components/shared/PageHeader';
@@ -21,7 +30,7 @@ interface Props {
 
 export default function AdminUsers({ users, filters }: Props) {
     const [search, setSearch] = useState(filters.search);
-    const [navigating, setNavigating] = useState(false);
+    const [navigating, setNavigating] = useState(() => _inertiaNavigating);
     const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     useEffect(() => {

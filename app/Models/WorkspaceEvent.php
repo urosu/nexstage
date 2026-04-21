@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Models;
 
+use App\Models\Concerns\HasAnnotationScope;
 use App\Scopes\WorkspaceScope;
 use Illuminate\Database\Eloquent\Attributes\ScopedBy;
 use Illuminate\Database\Eloquent\Model;
@@ -23,6 +24,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 #[ScopedBy([WorkspaceScope::class])]
 class WorkspaceEvent extends Model
 {
+    use HasAnnotationScope;
     protected $fillable = [
         'workspace_id',
         'event_type',
@@ -32,6 +34,8 @@ class WorkspaceEvent extends Model
         'is_auto_detected',
         'needs_review',
         'suppress_anomalies',
+        'scope_type',
+        'scope_id',
     ];
 
     protected function casts(): array

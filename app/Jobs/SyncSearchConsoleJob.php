@@ -16,6 +16,7 @@ use App\Models\Workspace;
 use App\Services\Integrations\SearchConsole\SearchConsoleClient;
 use App\Services\WorkspaceContext;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -32,7 +33,7 @@ use Throwable;
  * Reads from:   Google Search Console API v3
  * Writes to:    gsc_daily_stats, gsc_queries, gsc_pages
  *
- * Queue:   default
+ * Queue:   sync-google-search
  * Timeout: 300 s
  * Tries:   3
  * Backoff: [60, 300, 900] s
@@ -50,21 +51,27 @@ use Throwable;
  * Related: app/Models/GscDailyStat.php, GscQuery.php, GscPage.php (models)
  * See: PLANNING.md "Integration-specific rules" + "Data Capture Strategy"
  */
-class SyncSearchConsoleJob implements ShouldQueue
+class SyncSearchConsoleJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 300;
-    public int $tries   = 3;
+    public int $timeout   = 300;
+    public int $tries     = 3;
+    public int $uniqueFor = 330;
 
     /** @var array<int, int> */
     public array $backoff = [60, 300, 900];
+
+    public function uniqueId(): string
+    {
+        return (string) $this->propertyId;
+    }
 
     public function __construct(
         private readonly int $propertyId,
         private readonly int $workspaceId,
     ) {
-        $this->onQueue('default');
+        $this->onQueue('sync-google-search');
     }
 
     public function handle(): void
@@ -98,8 +105,9 @@ class SyncSearchConsoleJob implements ShouldQueue
             'job_type'      => self::class,
             'status'        => 'running',
             'started_at'    => now(),
-            'queue'         => 'default',
-            'attempt'       => $this->attempts(),
+            'queue'         => $this->queue,
+            'attempt'         => $this->attempts(),
+            'timeout_seconds' => $this->timeout,
         ]);
 
         try {

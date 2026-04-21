@@ -12,6 +12,7 @@ use App\Models\Workspace;
 use App\Services\Integrations\WooCommerce\WooCommerceConnector;
 use App\Services\WorkspaceContext;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -21,7 +22,7 @@ use Illuminate\Support\Facades\Log;
 /**
  * Nightly product sync for a single WooCommerce store.
  *
- * Queue:   default
+ * Queue:   sync-store
  * Timeout: 300 s
  * Tries:   3
  * Backoff: default [60, 300, 900] s
@@ -34,18 +35,24 @@ use Illuminate\Support\Facades\Log;
  *
  * Related: app/Services/Integrations/WooCommerce/WooCommerceConnector.php
  */
-class SyncProductsJob implements ShouldQueue
+class SyncProductsJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 300;
-    public int $tries   = 3;
+    public int $timeout   = 300;
+    public int $tries     = 3;
+    public int $uniqueFor = 330;
+
+    public function uniqueId(): string
+    {
+        return (string) $this->storeId;
+    }
 
     public function __construct(
         private readonly int $storeId,
         private readonly int $workspaceId,
     ) {
-        $this->onQueue('default');
+        $this->onQueue('sync-store');
     }
 
     public function handle(): void
@@ -68,12 +75,13 @@ class SyncProductsJob implements ShouldQueue
             'workspace_id'      => $this->workspaceId,
             'syncable_type'     => Store::class,
             'syncable_id'       => $this->storeId,
-            'job_type'          => 'SyncProductsJob',
+            'job_type'          => self::class,
             'status'            => 'running',
             'records_processed' => 0,
             'started_at'        => now(),
-            'queue'             => 'low',
+            'queue'             => $this->queue,
             'attempt'           => $this->attempts(),
+            'timeout_seconds'   => $this->timeout,
         ]);
 
         try {

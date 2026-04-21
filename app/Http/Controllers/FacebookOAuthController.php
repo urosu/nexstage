@@ -55,13 +55,29 @@ class FacebookOAuthController extends Controller
         // and account-selection redirect back to /onboarding instead of /settings/integrations.
         $returnTo = $request->query('from') === 'onboarding' ? 'onboarding' : 'integrations';
 
-        $state = $this->encodeState([
-            'workspace_id' => $workspaceId,
-            'type'         => 'facebook',
-            'nonce'        => Str::random(16),
-            'expires_at'   => now()->addMinutes(15)->timestamp,
-            'return_to'    => $returnTo,
-        ]);
+        $nonce = Str::random(32);
+
+        // Store nonce in cache so the callback can verify and consume it exactly once,
+        // preventing replay of a valid HMAC-signed state within the 15-minute window.
+        cache()->put("oauth_nonce_{$nonce}", true, now()->addMinutes(15));
+
+        // reconnect_id: if set, the callback will update-in-place instead of showing the account picker.
+        $reconnectId = $request->query('reconnect_id');
+
+        $payload = [
+            'workspace_id'   => $workspaceId,
+            'workspace_slug' => app(WorkspaceContext::class)->slug(),
+            'type'           => 'facebook',
+            'nonce'          => $nonce,
+            'expires_at'     => now()->addMinutes(15)->timestamp,
+            'return_to'      => $returnTo,
+        ];
+
+        if ($reconnectId !== null) {
+            $payload['reconnect_id'] = (int) $reconnectId;
+        }
+
+        $state = $this->encodeState($payload);
 
         $params = http_build_query([
             'client_id'    => config('services.facebook.client_id'),
@@ -88,15 +104,26 @@ class FacebookOAuthController extends Controller
             Log::warning('Facebook OAuth: invalid or expired state', [
                 'state_type' => $state['type'] ?? null,
             ]);
-            return redirect()->away(rtrim(config('app.url'), '/') . '/settings/integrations?oauth_error=' . urlencode('Facebook connection failed: invalid or expired link. Please try again.') . '&oauth_platform=facebook');
+            return redirect()->away(rtrim(config('app.url'), '/') . $this->oauthDest('integrations') . '?oauth_error=' . urlencode('Facebook connection failed: invalid or expired link. Please try again.') . '&oauth_platform=facebook');
         }
 
-        $workspaceId = (int) $state['workspace_id'];
-        $returnTo    = $state['return_to'] ?? 'integrations';
+        // Consume the nonce to prevent state replay within the 15-minute HMAC window.
+        $nonce = $state['nonce'] ?? '';
+        if (! $nonce || ! cache()->pull("oauth_nonce_{$nonce}")) {
+            Log::warning('Facebook OAuth: nonce already used or missing', [
+                'workspace_id' => $state['workspace_id'] ?? null,
+            ]);
+            return redirect()->away(rtrim(config('app.url'), '/') . $this->oauthDest('integrations') . '?oauth_error=' . urlencode('Facebook connection failed: link already used. Please try again.') . '&oauth_platform=facebook');
+        }
+
+        $workspaceId   = (int) $state['workspace_id'];
+        $workspaceSlug = $state['workspace_slug'] ?? null;
+        $returnTo      = $state['return_to'] ?? 'integrations';
+        $reconnectId   = isset($state['reconnect_id']) ? (int) $state['reconnect_id'] : null;
 
         // Handle user-denied permission
         if ($request->query('error')) {
-            return redirect()->away(rtrim(config('app.url'), '/') . $this->oauthDest($returnTo) . '?oauth_error=' . urlencode('Facebook connection was cancelled.') . '&oauth_platform=facebook');
+            return redirect()->away(rtrim(config('app.url'), '/') . $this->oauthDest($returnTo, $workspaceSlug) . '?oauth_error=' . urlencode('Facebook connection was cancelled.') . '&oauth_platform=facebook');
         }
 
         $code = (string) $request->query('code', '');
@@ -105,6 +132,11 @@ class FacebookOAuthController extends Controller
             $shortToken                   = $this->exchangeCodeForShortToken($code);
             ['token' => $longToken, 'expires_in' => $expiresIn] = $this->exchangeForLongLivedToken($shortToken);
 
+            // Reconnect path: skip account picker, update existing account in-place.
+            if ($reconnectId !== null) {
+                return $this->reconnectFacebookToken($workspaceId, $longToken, $expiresIn, $reconnectId, $returnTo, $workspaceSlug);
+            }
+
             $client     = new FacebookAdsClient($longToken);
             $adAccounts = $client->fetchAllAdAccounts();
         } catch (\App\Exceptions\FacebookRateLimitException $e) {
@@ -112,24 +144,26 @@ class FacebookOAuthController extends Controller
                 'workspace_id' => $workspaceId,
                 'retry_after'  => $e->retryAfter,
             ]);
-            return redirect()->away(rtrim(config('app.url'), '/') . $this->oauthDest($returnTo) . '?oauth_error=' . urlencode('Facebook is temporarily rate-limited. Please wait a minute and try connecting again.') . '&oauth_platform=facebook');
+            return redirect()->away(rtrim(config('app.url'), '/') . $this->oauthDest($returnTo, $workspaceSlug) . '?oauth_error=' . urlencode('Facebook is temporarily rate-limited. Please wait a minute and try connecting again.') . '&oauth_platform=facebook');
         } catch (FacebookApiException $e) {
             Log::error('Facebook OAuth: token exchange or account fetch failed', [
                 'workspace_id' => $workspaceId,
                 'error'        => $e->getMessage(),
             ]);
-            return redirect()->away(rtrim(config('app.url'), '/') . $this->oauthDest($returnTo) . '?oauth_error=' . urlencode('Facebook connection failed: ' . $e->getMessage()) . '&oauth_platform=facebook');
+            return redirect()->away(rtrim(config('app.url'), '/') . $this->oauthDest($returnTo, $workspaceSlug) . '?oauth_error=' . urlencode('Facebook connection failed: ' . $e->getMessage()) . '&oauth_platform=facebook');
         }
 
         if (empty($adAccounts)) {
-            return redirect()->away(rtrim(config('app.url'), '/') . $this->oauthDest($returnTo) . '?oauth_error=' . urlencode('No Facebook ad accounts were found for this user.') . '&oauth_platform=facebook');
+            return redirect()->away(rtrim(config('app.url'), '/') . $this->oauthDest($returnTo, $workspaceSlug) . '?oauth_error=' . urlencode('No Facebook ad accounts were found for this user.') . '&oauth_platform=facebook');
         }
 
         $pendingKey = 'fb_pending_' . Str::uuid();
 
+        // Encrypt the access token at rest in cache so Redis access alone does not
+        // expose live Facebook credentials.
         cache()->put($pendingKey, [
             'workspace_id' => $workspaceId,
-            'access_token' => $longToken,
+            'access_token' => Crypt::encryptString($longToken),
             'token_expiry' => now()->addSeconds($expiresIn)->timestamp,
             'accounts'     => array_map(static fn (array $a): array => [
                 'id'       => ltrim((string) $a['id'], 'act_'),
@@ -139,7 +173,7 @@ class FacebookOAuthController extends Controller
             'return_to'    => $returnTo,
         ], now()->addMinutes(15));
 
-        $redirectUrl = rtrim(config('app.url'), '/') . $this->oauthDest($returnTo) . '?fb_pending=' . urlencode($pendingKey);
+        $redirectUrl = rtrim(config('app.url'), '/') . $this->oauthDest($returnTo, $workspaceSlug) . '?fb_pending=' . urlencode($pendingKey);
 
         return redirect()->away($redirectUrl);
     }
@@ -167,7 +201,7 @@ class FacebookOAuthController extends Controller
         $pending = cache()->get($validated['fb_pending_key']);
 
         if ($pending === null || (int) ($pending['workspace_id'] ?? 0) !== $workspaceId) {
-            return redirect('/settings/integrations')
+            return redirect($this->oauthDest('integrations'))
                 ->with('error', 'Link expired. Please re-connect Facebook.');
         }
 
@@ -176,7 +210,7 @@ class FacebookOAuthController extends Controller
         cache()->forget($validated['fb_pending_key']);
 
         $selectedIds = $validated['account_ids'];
-        $longToken   = $pending['access_token'];
+        $longToken   = Crypt::decryptString($pending['access_token']);
         $tokenExpiry = \Carbon\Carbon::createFromTimestamp($pending['token_expiry']);
         $connected   = 0;
 
@@ -213,14 +247,14 @@ class FacebookOAuthController extends Controller
                     'syncable_id'   => $adAccount->id,
                     'job_type'      => \App\Jobs\AdHistoricalImportJob::class,
                     'status'        => 'queued',
-                    'queue'         => 'low',
+                    'queue'         => 'imports',
                     'scheduled_at'  => now(),
                 ]);
 
                 \App\Jobs\AdHistoricalImportJob::dispatch($adAccount->id, $workspaceId, $adSyncLog->id);
             }
 
-            SyncAdInsightsJob::dispatch($adAccount->id, $workspaceId);
+            SyncAdInsightsJob::dispatch($adAccount->id, $workspaceId, $adAccount->platform);
             $connected++;
         }
 
@@ -242,6 +276,71 @@ class FacebookOAuthController extends Controller
 
         return redirect($this->oauthDest($returnTo))
             ->with('success', "{$connected} Facebook ad account(s) connected successfully.");
+    }
+
+    // -------------------------------------------------------------------------
+    // Reconnect handler — update token in-place without showing the picker
+    // -------------------------------------------------------------------------
+
+    /**
+     * Re-authorise an existing Facebook Ads account after its token expired.
+     * Updates the long-lived token, resets failure counters, and re-queues a failed historical import.
+     */
+    private function reconnectFacebookToken(
+        int $workspaceId,
+        string $longToken,
+        int $expiresIn,
+        int $accountId,
+        string $returnTo,
+        ?string $workspaceSlug,
+    ): RedirectResponse {
+        $account = AdAccount::withoutGlobalScopes()
+            ->where('id', $accountId)
+            ->where('workspace_id', $workspaceId)
+            ->where('platform', 'facebook')
+            ->first();
+
+        if ($account === null) {
+            return redirect()->away(
+                rtrim(config('app.url'), '/') . $this->oauthDest($returnTo, $workspaceSlug)
+                . '?oauth_error=' . urlencode('Account not found or access denied.')
+                . '&oauth_platform=facebook'
+            );
+        }
+
+        $account->update([
+            'access_token_encrypted'    => Crypt::encryptString($longToken),
+            'refresh_token_encrypted'   => null,
+            'token_expires_at'          => now()->addSeconds($expiresIn),
+            'status'                    => 'active',
+            'consecutive_sync_failures' => 0,
+        ]);
+
+        if ($account->historical_import_status === 'failed') {
+            $account->update(['historical_import_status' => 'pending']);
+
+            $syncLog = \App\Models\SyncLog::create([
+                'workspace_id'  => $workspaceId,
+                'syncable_type' => AdAccount::class,
+                'syncable_id'   => $account->id,
+                'job_type'      => \App\Jobs\AdHistoricalImportJob::class,
+                'status'        => 'queued',
+                'queue'         => 'imports',
+                'scheduled_at'  => now(),
+            ]);
+
+            \App\Jobs\AdHistoricalImportJob::dispatch($account->id, $workspaceId, $syncLog->id);
+        }
+
+        SyncAdInsightsJob::dispatch($account->id, $workspaceId, 'facebook');
+
+        Log::info('Facebook: ad account token reconnected', [
+            'workspace_id' => $workspaceId,
+            'account_id'   => $account->id,
+        ]);
+
+        return redirect($this->oauthDest($returnTo, $workspaceSlug))
+            ->with('success', 'Facebook Ads account reconnected successfully.');
     }
 
     // -------------------------------------------------------------------------
@@ -392,9 +491,19 @@ class FacebookOAuthController extends Controller
      * Return the path to redirect to after OAuth, depending on where the flow was initiated.
      * When initiated from onboarding tiles, return '/onboarding'; otherwise '/settings/integrations'.
      */
-    private function oauthDest(string $returnTo): string
+    private function oauthDest(string $returnTo, ?string $workspaceSlug = null): string
     {
-        return $returnTo === 'onboarding' ? '/onboarding' : '/settings/integrations';
+        if ($returnTo === 'onboarding') {
+            return '/onboarding';
+        }
+
+        if ($workspaceSlug === null) {
+            $workspaceSlug = app(WorkspaceContext::class)->slug();
+        }
+
+        return $workspaceSlug
+            ? "/{$workspaceSlug}/settings/integrations"
+            : '/settings/integrations';
     }
 
     private function authorizeWorkspaceAccess(Request $request, int $workspaceId): void

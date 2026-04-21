@@ -10,8 +10,9 @@ use App\Services\WorkspaceContext;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response as HttpResponse;
-use Illuminate\Validation\Rule;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -53,10 +54,15 @@ class BillingController extends Controller
 
         // Subscription, payment methods, and invoices via Cashier — wrapped in try/catch
         // so the billing page renders even when Stripe is not configured.
+        // Stripe data is cached for 60 s per workspace to avoid 4 API round-trips on every
+        // page load. The lazy-sync of pm_type/pm_last_four runs on a cache miss only.
         $subscriptionData    = null;
         $paymentMethodsData  = [];
         $invoicesData        = [];
+        $upcomingInvoiceData = null;
+
         try {
+            // subscription() reads the local subscriptions table — no Stripe call needed.
             $subscription = $workspace->subscription('default');
             if ($subscription) {
                 $subscriptionData = [
@@ -68,64 +74,86 @@ class BillingController extends Controller
                 ];
             }
 
-            // All payment methods on file
-            $defaultPmId = $workspace->defaultPaymentMethod()?->id;
-            foreach ($workspace->paymentMethods() as $pm) {
-                $card = $pm->card;
-                $entry = [
-                    'id'        => $pm->id,
-                    'brand'     => $card?->brand,
-                    'last4'     => $card?->last4,
-                    'exp_month' => $card?->exp_month,
-                    'exp_year'  => $card?->exp_year,
-                    'wallet'    => $card?->wallet?->type,
-                    'is_default' => $pm->id === $defaultPmId,
-                ];
-                $paymentMethodsData[] = $entry;
+            // Payment methods, invoices, and upcoming invoice are cached to avoid
+            // 3 Stripe API round-trips on every page render.
+            $stripeCacheKey = "billing_stripe_{$workspace->id}";
+            $stripeData     = Cache::remember($stripeCacheKey, 60, function () use ($workspace): array {
+                $paymentMethods = [];
+                $invoices       = [];
+                $upcoming       = null;
+                $defaultPmSync  = null;
 
-                // Lazy-sync default pm columns from Stripe.
-                if ($entry['is_default']) {
-                    $freshType  = $card?->brand ?? $pm->type;
-                    $freshLast4 = $card?->last4;
-                    if ($workspace->pm_type !== $freshType || $workspace->pm_last_four !== $freshLast4) {
-                        $workspace->forceFill([
-                            'pm_type'      => $freshType,
-                            'pm_last_four' => $freshLast4,
-                        ])->save();
+                $defaultPmId = $workspace->defaultPaymentMethod()?->id;
+                foreach ($workspace->paymentMethods() as $pm) {
+                    $card  = $pm->card;
+                    $entry = [
+                        'id'         => $pm->id,
+                        'brand'      => $card?->brand,
+                        'last4'      => $card?->last4,
+                        'exp_month'  => $card?->exp_month,
+                        'exp_year'   => $card?->exp_year,
+                        'wallet'     => $card?->wallet?->type,
+                        'is_default' => $pm->id === $defaultPmId,
+                    ];
+                    $paymentMethods[] = $entry;
+
+                    if ($entry['is_default']) {
+                        $defaultPmSync = ['type' => $card?->brand ?? $pm->type, 'last4' => $card?->last4];
                     }
                 }
-            }
 
-            // Last 24 invoices
-            foreach ($workspace->invoices() as $invoice) {
-                $invoicesData[] = [
-                    'id'           => $invoice->id,
-                    'number'       => $invoice->number,
-                    'amount_due'   => $invoice->rawTotal() / 100,
-                    'currency'     => strtoupper($invoice->invoice->currency),
-                    'status'       => $invoice->status,
-                    'date'         => $invoice->date()->toISOString(),
-                    'download_url' => route('settings.billing.invoices.download', ['invoiceId' => $invoice->id]),
-                    'hosted_url'   => $invoice->hostedInvoiceUrl(),
-                ];
-            }
+                foreach ($workspace->invoices() as $invoice) {
+                    $invoices[] = [
+                        'id'           => $invoice->id,
+                        'number'       => $invoice->number,
+                        'amount_due'   => $invoice->rawTotal() / 100,
+                        'currency'     => strtoupper($invoice->invoice->currency),
+                        'status'       => $invoice->status,
+                        'date'         => $invoice->date()->toISOString(),
+                        'download_url' => route('settings.billing.invoices.download', ['invoiceId' => $invoice->id]),
+                        'hosted_url'   => $invoice->hostedInvoiceUrl(),
+                    ];
+                }
 
-            // Upcoming invoice (null for trial / cancelled / no subscription)
-            $upcoming = $workspace->upcomingInvoice();
-            if ($upcoming) {
-                $upcomingInvoiceData = [
-                    'amount'   => $upcoming->rawTotal() / 100,
-                    'currency' => strtoupper($upcoming->invoice->currency),
-                    'date'     => $upcoming->date()->toISOString(),
+                $upcomingObj = $workspace->upcomingInvoice();
+                if ($upcomingObj) {
+                    $upcoming = [
+                        'amount'   => $upcomingObj->rawTotal() / 100,
+                        'currency' => strtoupper($upcomingObj->invoice->currency),
+                        'date'     => $upcomingObj->date()->toISOString(),
+                    ];
+                }
+
+                return [
+                    'payment_methods' => $paymentMethods,
+                    'invoices'        => $invoices,
+                    'upcoming'        => $upcoming,
+                    'default_pm_sync' => $defaultPmSync,
                 ];
+            });
+
+            $paymentMethodsData  = $stripeData['payment_methods'];
+            $invoicesData        = $stripeData['invoices'];
+            $upcomingInvoiceData = $stripeData['upcoming'];
+
+            // Lazy-sync default pm columns — only when fetched fresh from Stripe (cache miss).
+            // On cache hits, $stripeData came from closure execution which would have synced already.
+            if ($stripeData['default_pm_sync'] !== null) {
+                $freshType  = $stripeData['default_pm_sync']['type'];
+                $freshLast4 = $stripeData['default_pm_sync']['last4'];
+                if ($workspace->pm_type !== $freshType || $workspace->pm_last_four !== $freshLast4) {
+                    $workspace->forceFill([
+                        'pm_type'      => $freshType,
+                        'pm_last_four' => $freshLast4,
+                    ])->save();
+                }
             }
         } catch (\Stripe\Exception\AuthenticationException|\Stripe\Exception\ApiConnectionException $e) {
             \Illuminate\Support\Facades\Log::warning('Stripe unavailable on billing page load', ['error' => $e->getMessage()]);
         }
 
-        $currentMonthTier    = $this->resolveTierFromRevenue($currentMonthRevenue);
-        $daysUntilBilling    = (int) $now->diffInDays($now->copy()->startOfMonth()->addMonth(), false);
-        $upcomingInvoiceData = $upcomingInvoiceData ?? null;
+        $currentMonthTier = $this->resolveTierFromRevenue($currentMonthRevenue);
+        $daysUntilBilling = (int) $now->diffInDays($now->copy()->startOfMonth()->addMonth(), false);
 
         // Extrapolate current month billable to a full-month estimate.
         // Only meaningful from day 7 onwards — before that there's too little data.
@@ -367,6 +395,15 @@ class BillingController extends Controller
     /**
      * Called after the frontend confirms a SetupIntent.
      * Sets the new payment method as default if the workspace has no default yet.
+     *
+     * Also attempts to infer store primary_country_code from the payment method's
+     * billing address country when the store has no country set yet. This is one of
+     * three auto-detection mechanisms per PLANNING section 10 (Country auto-detection):
+     *   1. ccTLD from domain URL    — client-side, highest priority
+     *   2. IP geolocation on login  — server-side session hint
+     *   3. Stripe billing country   — extracted here, applied directly when unambiguous
+     *
+     * Only fills NULL country codes — never overwrites a value the user explicitly set.
      */
     public function confirmPaymentMethod(string $pmId): RedirectResponse
     {
@@ -377,7 +414,59 @@ class BillingController extends Controller
             $workspace->updateDefaultPaymentMethod($pmId);
         }
 
+        // Extract billing country from the payment method and apply to stores missing one.
+        $this->applyBillingCountryFromPaymentMethod($workspace, $pmId);
+
         return back()->with('success', 'Payment method saved.');
+    }
+
+    /**
+     * Reads billing_details.address.country from the Stripe payment method and applies
+     * it as primary_country_code to every store in the workspace that has no country set.
+     *
+     * Only stores the detected country when it is a valid 2-letter ISO code and the store
+     * field is currently NULL. Users can override via store settings.
+     */
+    private function applyBillingCountryFromPaymentMethod(Workspace $workspace, string $pmId): void
+    {
+        // Only run when there are stores without a country (avoids unnecessary Stripe calls).
+        $nullCountryStores = \App\Models\Store::withoutGlobalScopes()
+            ->where('workspace_id', $workspace->id)
+            ->whereNull('primary_country_code')
+            ->get(['id']);
+
+        if ($nullCountryStores->isEmpty()) {
+            return;
+        }
+
+        try {
+            $pm = $workspace->findPaymentMethod($pmId);
+            // Cashier wraps the raw Stripe PM — access the underlying object for billing_details.
+            $country = $pm?->billing_details?->address?->country ?? null;
+
+            if (! $country || ! preg_match('/^[A-Z]{2}$/', strtoupper($country))) {
+                return;
+            }
+
+            $countryCode = strtoupper($country);
+
+            foreach ($nullCountryStores as $store) {
+                $store->update(['primary_country_code' => $countryCode]);
+            }
+
+            \Illuminate\Support\Facades\Log::info('Applied billing address country to stores', [
+                'workspace_id' => $workspace->id,
+                'country'      => $countryCode,
+                'store_count'  => $nullCountryStores->count(),
+            ]);
+        } catch (\Throwable $e) {
+            // Non-critical — log and continue. The store page always lets users set country manually.
+            \Illuminate\Support\Facades\Log::debug('Could not extract Stripe billing country', [
+                'workspace_id' => $workspace->id,
+                'pm_id'        => $pmId,
+                'error'        => $e->getMessage(),
+            ]);
+        }
     }
 
     /**

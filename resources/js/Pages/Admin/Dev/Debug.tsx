@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Head } from '@inertiajs/react';
 import {
     AlertTriangle,
@@ -99,9 +99,16 @@ function StatusBadge({ status }: { status: string }) {
 
 function CopyButton({ text }: { text: string }) {
     const [copied, setCopied] = useState(false);
+    const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
     return (
         <button
-            onClick={() => { navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
+            onClick={() => {
+                navigator.clipboard.writeText(text);
+                setCopied(true);
+                if (timerRef.current) clearTimeout(timerRef.current);
+                timerRef.current = setTimeout(() => setCopied(false), 1500);
+            }}
             className="shrink-0 rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 transition-colors"
             title="Copy JSON"
         >

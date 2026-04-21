@@ -29,7 +29,7 @@ use Illuminate\Support\Facades\Log;
  * Side-effect: sets workspaces.has_psi = true on the first successful snapshot
  *              so the nav indicator and dashboard row become visible.
  *
- * Queue:   low (Lighthouse checks are non-urgent background analytics)
+ * Queue:   sync-psi
  * Timeout: 60 s (PSI responses can take 15–30 s for slow pages)
  * Tries:   2 (PSI failures are transient; a missed daily check is not critical)
  * Backoff: [300] s (5 min before retry)
@@ -46,7 +46,7 @@ class RunLighthouseCheckJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 60;
+    public int $timeout = 90;
     public int $tries   = 2;
 
     /** @var int[] */
@@ -58,7 +58,7 @@ class RunLighthouseCheckJob implements ShouldQueue
         private readonly int $workspaceId,
         private readonly string $strategy = 'mobile',
     ) {
-        $this->onQueue('low');
+        $this->onQueue('sync-psi');
     }
 
     public function handle(): void
@@ -93,24 +93,30 @@ class RunLighthouseCheckJob implements ShouldQueue
         $now = now();
 
         LighthouseSnapshot::create([
-            'workspace_id'            => $this->workspaceId,
-            'store_id'                => $this->storeId,
-            'store_url_id'            => $this->storeUrlId,
-            'checked_at'              => $now,
-            'strategy'                => $this->strategy,
-            'performance_score'       => $result['performance_score'],
-            'seo_score'               => $result['seo_score'],
-            'accessibility_score'     => $result['accessibility_score'],
-            'best_practices_score'    => $result['best_practices_score'],
-            'lcp_ms'                  => $result['lcp_ms'],
-            'fcp_ms'                  => $result['fcp_ms'],
-            'cls_score'               => $result['cls_score'],
-            'inp_ms'                  => $result['inp_ms'],
-            'ttfb_ms'                 => $result['ttfb_ms'],
-            'tbt_ms'                  => $result['tbt_ms'],
-            'raw_response'            => $result['raw_response'],
+            'workspace_id'             => $this->workspaceId,
+            'store_id'                 => $this->storeId,
+            'store_url_id'             => $this->storeUrlId,
+            'checked_at'               => $now,
+            'strategy'                 => $this->strategy,
+            'performance_score'        => $result['performance_score'],
+            'seo_score'                => $result['seo_score'],
+            'accessibility_score'      => $result['accessibility_score'],
+            'best_practices_score'     => $result['best_practices_score'],
+            'lcp_ms'                   => $result['lcp_ms'],
+            'fcp_ms'                   => $result['fcp_ms'],
+            'cls_score'                => $result['cls_score'],
+            'inp_ms'                   => $result['inp_ms'],
+            'ttfb_ms'                  => $result['ttfb_ms'],
+            'tbt_ms'                   => $result['tbt_ms'],
+            'crux_source'              => $result['crux_source'],
+            'crux_lcp_p75_ms'          => $result['crux_lcp_p75_ms'],
+            'crux_inp_p75_ms'          => $result['crux_inp_p75_ms'],
+            'crux_cls_p75'             => $result['crux_cls_p75'],
+            'crux_fcp_p75_ms'          => $result['crux_fcp_p75_ms'],
+            'crux_ttfb_p75_ms'         => $result['crux_ttfb_p75_ms'],
+            'raw_response'             => $result['raw_response'],
             'raw_response_api_version' => $result['api_version'],
-            'created_at'              => $now,
+            'created_at'               => $now,
         ]);
 
         // Set has_psi on the workspace after the first successful snapshot.

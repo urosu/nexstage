@@ -20,6 +20,8 @@ class Campaign extends Model
         'ad_account_id',
         'external_id',
         'name',
+        'previous_names',
+        'parsed_convention',
         'status',
         'objective',
         'daily_budget',
@@ -34,6 +36,8 @@ class Campaign extends Model
     protected function casts(): array
     {
         return [
+            'previous_names'    => 'array',
+            'parsed_convention' => 'array',
             'daily_budget' => 'decimal:2',
             'lifetime_budget' => 'decimal:2',
             'target_value' => 'decimal:2',

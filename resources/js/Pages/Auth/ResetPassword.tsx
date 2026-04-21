@@ -2,7 +2,7 @@ import AuthLayout from '@/Components/layouts/AuthLayout';
 import { Button } from '@/Components/ui/button';
 import { Input } from '@/Components/ui/input';
 import { Label } from '@/Components/ui/label';
-import { Head, useForm } from '@inertiajs/react';
+import { Head, Link, useForm } from '@inertiajs/react';
 import { FormEventHandler } from 'react';
 
 export default function ResetPassword({
@@ -74,8 +74,15 @@ export default function ResetPassword({
                     {errors.password_confirmation && <p className="mt-2 text-sm text-red-600">{errors.password_confirmation}</p>}
                 </div>
 
-                <div className="mt-4 flex items-center justify-end">
-                    <Button disabled={processing}>
+                <div className="mt-4 flex items-center justify-between">
+                    <Link
+                        href={route('login')}
+                        className="rounded-md text-sm text-zinc-600 underline hover:text-zinc-900 focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2"
+                    >
+                        Back to login
+                    </Link>
+
+                    <Button type="submit" disabled={processing}>
                         Reset Password
                     </Button>
                 </div>

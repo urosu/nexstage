@@ -8,13 +8,21 @@ class WorkspaceContext
 {
     private ?int $workspaceId = null;
 
-    public function set(int $id): void
+    private ?string $workspaceSlug = null;
+
+    public function set(int $id, ?string $slug = null): void
     {
         $this->workspaceId = $id;
+        $this->workspaceSlug = $slug;
     }
 
     public function id(): ?int
     {
         return $this->workspaceId;
+    }
+
+    public function slug(): ?string
+    {
+        return $this->workspaceSlug;
     }
 }

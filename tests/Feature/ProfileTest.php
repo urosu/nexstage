@@ -12,29 +12,37 @@ class ProfileTest extends TestCase
 {
     use RefreshDatabase;
 
-    private function makeUserWithWorkspace(): User
+    /**
+     * @return array{0: User, 1: Workspace}
+     */
+    private function makeUserWithWorkspace(): array
     {
-        $user      = User::factory()->create();
-        $workspace = Workspace::factory()->create(['owner_id' => $user->id]);
+        $user = User::factory()->create();
+        // has_ads=true passes EnsureOnboardingComplete (ads-only onboarding path)
+        // so profile routes (gated by 'onboarded' middleware) are accessible.
+        $workspace = Workspace::factory()->create([
+            'owner_id' => $user->id,
+            'has_ads'  => true,
+        ]);
         WorkspaceUser::factory()->owner()->create(['user_id' => $user->id, 'workspace_id' => $workspace->id]);
 
-        return $user;
+        return [$user, $workspace];
     }
 
     public function test_profile_page_is_displayed(): void
     {
-        $user = $this->makeUserWithWorkspace();
+        [$user, $workspace] = $this->makeUserWithWorkspace();
 
         $response = $this
             ->actingAs($user)
-            ->get('/settings/profile');
+            ->get("/{$workspace->slug}/settings/profile");
 
         $response->assertOk();
     }
 
     public function test_profile_information_can_be_updated(): void
     {
-        $user = $this->makeUserWithWorkspace();
+        [$user] = $this->makeUserWithWorkspace();
 
         $response = $this
             ->actingAs($user)
@@ -57,7 +65,7 @@ class ProfileTest extends TestCase
 
     public function test_email_verification_status_is_unchanged_when_the_email_address_is_unchanged(): void
     {
-        $user = $this->makeUserWithWorkspace();
+        [$user] = $this->makeUserWithWorkspace();
 
         $response = $this
             ->actingAs($user)
@@ -76,7 +84,7 @@ class ProfileTest extends TestCase
 
     public function test_user_can_delete_their_account(): void
     {
-        $user = $this->makeUserWithWorkspace();
+        [$user] = $this->makeUserWithWorkspace();
 
         $response = $this
             ->actingAs($user)
@@ -94,7 +102,7 @@ class ProfileTest extends TestCase
 
     public function test_correct_password_must_be_provided_to_delete_account(): void
     {
-        $user = $this->makeUserWithWorkspace();
+        [$user] = $this->makeUserWithWorkspace();
 
         $response = $this
             ->actingAs($user)

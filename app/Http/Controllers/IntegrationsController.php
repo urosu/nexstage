@@ -7,10 +7,12 @@ namespace App\Http\Controllers;
 use App\Actions\RemoveAdAccountAction;
 use App\Actions\RemoveGscPropertyAction;
 use App\Actions\RemoveStoreAction;
+use App\Actions\StartHistoricalImportAction;
 use App\Jobs\AdHistoricalImportJob;
 use App\Jobs\GscHistoricalImportJob;
 use App\Jobs\SyncAdInsightsJob;
 use App\Jobs\SyncSearchConsoleJob;
+use App\Jobs\SyncShopifyOrdersJob;
 use App\Jobs\SyncStoreOrdersJob;
 use App\Jobs\WooCommerceHistoricalImportJob;
 use App\Models\AdAccount;
@@ -229,14 +231,14 @@ class IntegrationsController extends Controller
         $name = $store->name;
         (new RemoveStoreAction)->handle($store);
 
-        return redirect()->route('settings.integrations')
+        return redirect()->route('settings.integrations', ['workspace' => $workspace->slug])
             ->with('success', "{$name} removed.");
     }
 
     /**
      * Permanently remove a Facebook or Google Ads ad account and all its data.
      */
-    public function removeAdAccount(Request $request, int $adAccountId): RedirectResponse
+    public function removeAdAccount(Request $request, string $adAccountId): RedirectResponse
     {
         $workspace = Workspace::findOrFail(app(WorkspaceContext::class)->id());
 
@@ -257,7 +259,7 @@ class IntegrationsController extends Controller
     /**
      * Permanently remove a Google Search Console property and all its data.
      */
-    public function removeGsc(Request $request, int $propertyId): RedirectResponse
+    public function removeGsc(Request $request, string $propertyId): RedirectResponse
     {
         $workspace = Workspace::findOrFail(app(WorkspaceContext::class)->id());
 
@@ -311,7 +313,7 @@ class IntegrationsController extends Controller
      * Retry a failed historical import for a Facebook or Google Ads account.
      * Preserves the existing checkpoint so the job resumes from where it failed.
      */
-    public function retryImportAdAccount(Request $request, int $adAccountId): RedirectResponse
+    public function retryImportAdAccount(Request $request, string $adAccountId): RedirectResponse
     {
         $workspace = Workspace::findOrFail(app(WorkspaceContext::class)->id());
 
@@ -343,7 +345,7 @@ class IntegrationsController extends Controller
      * Retry a failed historical import for a Search Console property.
      * Preserves the existing checkpoint so the job resumes from where it failed.
      */
-    public function retryImportGsc(Request $request, int $propertyId): RedirectResponse
+    public function retryImportGsc(Request $request, string $propertyId): RedirectResponse
     {
         $workspace = Workspace::findOrFail(app(WorkspaceContext::class)->id());
 
@@ -375,7 +377,7 @@ class IntegrationsController extends Controller
      * Re-import a store's history from a user-chosen date, discarding any existing
      * checkpoint so the job starts fresh from that date.
      */
-    public function reimportStore(Request $request, string $storeSlug): RedirectResponse
+    public function reimportStore(Request $request, string $storeSlug, StartHistoricalImportAction $importAction): RedirectResponse
     {
         $workspace = Workspace::findOrFail(app(WorkspaceContext::class)->id());
 
@@ -390,22 +392,19 @@ class IntegrationsController extends Controller
             'from_date' => ['nullable', 'date', 'before:today'],
         ]);
 
+        // Reset import state before re-dispatching.
         $store->update([
-            'historical_import_status'       => 'pending',
-            'historical_import_from'         => $validated['from_date'] ?? null,
+            'status'                         => 'active',
+            'consecutive_sync_failures'      => 0,
             'historical_import_checkpoint'   => null,
-            'historical_import_progress'     => null,
+            'historical_import_completed_at' => null,
         ]);
 
-        $syncLog = SyncLog::create([
-            'workspace_id'  => $workspace->id,
-            'syncable_type' => Store::class,
-            'syncable_id'   => $store->id,
-            'job_type'      => WooCommerceHistoricalImportJob::class,
-            'status'        => 'queued',
-        ]);
+        $fromDate = isset($validated['from_date'])
+            ? \Carbon\Carbon::parse($validated['from_date'])
+            : \Carbon\Carbon::createFromDate(2010, 1, 1);
 
-        WooCommerceHistoricalImportJob::dispatch($store->id, $workspace->id, $syncLog->id);
+        $importAction->handle($store, $fromDate);
 
         $fromLabel = $validated['from_date'] ?? 'the beginning';
 
@@ -415,7 +414,7 @@ class IntegrationsController extends Controller
     /**
      * Re-import an ad account's history from a user-chosen date.
      */
-    public function reimportAdAccount(Request $request, int $adAccountId): RedirectResponse
+    public function reimportAdAccount(Request $request, string $adAccountId): RedirectResponse
     {
         $workspace = Workspace::findOrFail(app(WorkspaceContext::class)->id());
 
@@ -459,7 +458,7 @@ class IntegrationsController extends Controller
     /**
      * Re-import a Search Console property's history from a user-chosen date.
      */
-    public function reimportGsc(Request $request, int $propertyId): RedirectResponse
+    public function reimportGsc(Request $request, string $propertyId): RedirectResponse
     {
         $workspace = Workspace::findOrFail(app(WorkspaceContext::class)->id());
 
@@ -497,8 +496,8 @@ class IntegrationsController extends Controller
     }
 
     /**
-     * Manually trigger a WooCommerce order sync for a single store.
-     * Bypasses the webhook-active check so the sync always runs.
+     * Manually trigger an order sync for a single store.
+     * Routes to the platform-specific sync job; bypasses the webhook-active check.
      */
     public function syncStore(Request $request, string $storeSlug): RedirectResponse
     {
@@ -511,7 +510,19 @@ class IntegrationsController extends Controller
 
         $this->authorize('delete', $store); // StorePolicy — owner or admin
 
-        dispatch(new SyncStoreOrdersJob($store->id, $store->workspace_id, force: true));
+        // Reset error state so the job doesn't silently exit on the status !== 'active' guard.
+        if ($store->status === 'error') {
+            $store->update([
+                'status'                    => 'active',
+                'consecutive_sync_failures' => 0,
+            ]);
+        }
+
+        if ($store->platform === 'shopify') {
+            dispatch(new SyncShopifyOrdersJob($store->id, $store->workspace_id, force: true));
+        } else {
+            dispatch(new SyncStoreOrdersJob($store->id, $store->workspace_id, force: true));
+        }
 
         $key     = "sync_queued_stores_{$workspace->id}";
         $current = cache()->get($key, []);
@@ -525,7 +536,7 @@ class IntegrationsController extends Controller
     /**
      * Manually trigger an ad insights sync for a single ad account.
      */
-    public function syncAdAccount(Request $request, int $adAccountId): RedirectResponse
+    public function syncAdAccount(Request $request, string $adAccountId): RedirectResponse
     {
         $workspace = Workspace::findOrFail(app(WorkspaceContext::class)->id());
 
@@ -536,7 +547,16 @@ class IntegrationsController extends Controller
 
         $this->authorize('update', $workspace); // owner or admin
 
-        dispatch(new SyncAdInsightsJob($adAccount->id, $workspace->id));
+        // A manual sync is an explicit user-initiated retry. Reset error state so the job
+        // doesn't silently exit on the status !== 'active' guard in SyncAdInsightsJob.
+        if ($adAccount->status === 'error') {
+            $adAccount->update([
+                'status'                    => 'active',
+                'consecutive_sync_failures' => 0,
+            ]);
+        }
+
+        dispatch(new SyncAdInsightsJob($adAccount->id, $workspace->id, $adAccount->platform));
 
         $key     = "sync_queued_ad_accounts_{$workspace->id}";
         $current = cache()->get($key, []);
@@ -550,7 +570,7 @@ class IntegrationsController extends Controller
     /**
      * Manually trigger a Search Console sync for a single property.
      */
-    public function syncGsc(Request $request, int $propertyId): RedirectResponse
+    public function syncGsc(Request $request, string $propertyId): RedirectResponse
     {
         $workspace = Workspace::findOrFail(app(WorkspaceContext::class)->id());
 

@@ -16,6 +16,7 @@ return new class extends Migration
             $table->foreignId('store_id')->constrained('stores')->cascadeOnDelete();
             $table->string('external_id');
             $table->string('name', 500);
+            $table->string('slug', 500)->nullable();
             $table->string('sku')->nullable();
             $table->decimal('price', 12, 4)->nullable();
             $table->string('status', 100)->nullable();

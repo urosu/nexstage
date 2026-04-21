@@ -8,6 +8,7 @@ use App\Actions\AcceptWorkspaceInvitationAction;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Auth\LoginRequest;
 use App\Models\WorkspaceInvitation;
+use App\Services\GeoDetectionService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -43,6 +44,7 @@ class AuthenticatedSessionController extends Controller
     public function store(
         LoginRequest $request,
         AcceptWorkspaceInvitationAction $action,
+        GeoDetectionService $geo,
     ): RedirectResponse {
         $request->authenticate();
 
@@ -50,6 +52,15 @@ class AuthenticatedSessionController extends Controller
 
         /** @var \App\Models\User $authUser */
         $authUser = Auth::user();
+
+        // IP geolocation — only on first-ever login (last_login_at is null).
+        // Stores the detected country in the session for use by OnboardingController
+        // as a lowest-priority pre-fill hint for stores.primary_country_code.
+        // @see PLANNING.md section 10 (Country auto-detection)
+        if ($authUser->last_login_at === null) {
+            $geo->detect($request);
+        }
+
         $authUser->forceFill(['last_login_at' => now()])->save();
 
         // Process invitation token submitted from login form (existing user path)

@@ -61,79 +61,124 @@ class RevenueAttributionServiceTest extends TestCase
         ], $overrides));
     }
 
+    /**
+     * Build a minimal attribution_last_touch JSON blob.
+     *
+     * Pass channel_type and channel to simulate a recognized channel; omit them
+     * to simulate an unrecognized source (no channel_mappings row matched).
+     */
+    private function touch(string $source, string $medium = 'cpc', ?string $channelType = null, ?string $channel = null, ?string $campaign = null): string
+    {
+        $data = ['source' => $source, 'medium' => $medium];
+        if ($channelType !== null) {
+            $data['channel_type'] = $channelType;
+        }
+        if ($channel !== null) {
+            $data['channel'] = $channel;
+        }
+        if ($campaign !== null) {
+            $data['campaign'] = $campaign;
+        }
+        return json_encode($data, JSON_THROW_ON_ERROR);
+    }
+
     // -------------------------------------------------------------------------
     // getAttributedRevenue — channel bucketing
     // -------------------------------------------------------------------------
 
-    public function test_facebook_aliases_all_bucketed(): void
+    public function test_paid_social_bucketed_as_facebook(): void
     {
-        foreach (['facebook', 'fb', 'ig', 'instagram'] as $source) {
+        // Three different paid_social sources (all Meta variants in the channel seed)
+        foreach ([
+            ['source' => 'facebook',  'channel' => 'Paid — Facebook'],
+            ['source' => 'instagram', 'channel' => 'Paid — Instagram'],
+            ['source' => 'fb',        'channel' => 'Paid — Facebook'],
+        ] as $entry) {
             $this->insertOrder([
-                'external_id'                 => uniqid("order-{$source}-"),
-                'utm_source'                  => $source,
+                'external_id'                 => uniqid('order-'),
+                'attribution_source'          => 'wc_native',
+                'attribution_last_touch'      => $this->touch($entry['source'], 'cpc', 'paid_social', $entry['channel']),
                 'total_in_reporting_currency' => 50.00,
             ]);
         }
 
         $result = $this->service->getAttributedRevenue($this->workspace->id, $this->from, $this->to);
 
-        $this->assertEqualsWithDelta(200.00, $result['facebook'], 0.01);
-        $this->assertEqualsWithDelta(0.00, $result['google'], 0.01);
-        $this->assertEqualsWithDelta(0.00, $result['other_tagged'], 0.01);
+        $this->assertEqualsWithDelta(150.00, $result['facebook'], 0.01);
+        $this->assertEqualsWithDelta(0.00,   $result['google'],   0.01);
+        $this->assertEqualsWithDelta(0.00,   $result['other_tagged'], 0.01);
     }
 
-    public function test_google_aliases_all_bucketed(): void
-    {
-        foreach (['google', 'cpc', 'google-ads', 'ppc'] as $source) {
-            $this->insertOrder([
-                'external_id'                 => uniqid("order-{$source}-"),
-                'utm_source'                  => $source,
-                'total_in_reporting_currency' => 25.00,
-            ]);
-        }
-
-        $result = $this->service->getAttributedRevenue($this->workspace->id, $this->from, $this->to);
-
-        $this->assertEqualsWithDelta(100.00, $result['google'], 0.01);
-        $this->assertEqualsWithDelta(0.00, $result['facebook'], 0.01);
-    }
-
-    public function test_utm_source_case_insensitive(): void
+    public function test_paid_search_bucketed_as_google(): void
     {
         $this->insertOrder([
-            'utm_source'                  => 'FACEBOOK',
-            'total_in_reporting_currency' => 80.00,
+            'attribution_source'          => 'wc_native',
+            'attribution_last_touch'      => $this->touch('google', 'cpc', 'paid_search', 'Paid — Google Ads', '12345'),
+            'total_in_reporting_currency' => 100.00,
         ]);
         $this->insertOrder([
-            'external_id'                 => uniqid('order-', true),
-            'utm_source'                  => 'Google',
-            'total_in_reporting_currency' => 40.00,
+            'external_id'                 => uniqid('order-'),
+            'attribution_source'          => 'pys',
+            'attribution_last_touch'      => $this->touch('adwords', 'cpc', 'paid_search', 'Paid — Google Ads'),
+            'total_in_reporting_currency' => 50.00,
         ]);
 
         $result = $this->service->getAttributedRevenue($this->workspace->id, $this->from, $this->to);
 
-        $this->assertEqualsWithDelta(80.00, $result['facebook'], 0.01);
-        $this->assertEqualsWithDelta(40.00, $result['google'], 0.01);
+        $this->assertEqualsWithDelta(150.00, $result['google'],   0.01);
+        $this->assertEqualsWithDelta(0.00,   $result['facebook'], 0.01);
     }
 
-    public function test_unrecognised_source_goes_to_other_tagged(): void
+    public function test_email_channel_goes_to_other_tagged(): void
     {
         $this->insertOrder([
-            'utm_source'                  => 'tiktok',
+            'attribution_source'          => 'pys',
+            'attribution_last_touch'      => $this->touch('klaviyo', 'email', 'email', 'Email — Klaviyo'),
             'total_in_reporting_currency' => 60.00,
         ]);
 
         $result = $this->service->getAttributedRevenue($this->workspace->id, $this->from, $this->to);
 
         $this->assertEqualsWithDelta(60.00, $result['other_tagged'], 0.01);
-        $this->assertEqualsWithDelta(0.00, $result['facebook'], 0.01);
-        $this->assertEqualsWithDelta(0.00, $result['google'], 0.01);
+        $this->assertEqualsWithDelta(0.00,  $result['facebook'],     0.01);
+        $this->assertEqualsWithDelta(0.00,  $result['google'],       0.01);
     }
 
-    public function test_no_utm_source_excluded_from_tagged(): void
+    public function test_unrecognized_source_goes_to_other_tagged(): void
+    {
+        // No channel/channel_type = unrecognized source (no channel_mappings row matched)
+        $this->insertOrder([
+            'attribution_source'          => 'pys',
+            'attribution_last_touch'      => $this->touch('snapchat', 'cpc'),
+            'total_in_reporting_currency' => 60.00,
+        ]);
+
+        $result = $this->service->getAttributedRevenue($this->workspace->id, $this->from, $this->to);
+
+        $this->assertEqualsWithDelta(60.00, $result['other_tagged'], 0.01);
+        $this->assertEqualsWithDelta(0.00,  $result['facebook'],     0.01);
+        $this->assertEqualsWithDelta(0.00,  $result['google'],       0.01);
+    }
+
+    public function test_referrer_heuristic_excluded_from_all_tagged_buckets(): void
+    {
+        // attribution_source='referrer' = heuristic, no UTM link clicked → excluded from tagged
+        $this->insertOrder([
+            'attribution_source'          => 'referrer',
+            'attribution_last_touch'      => $this->touch('google', 'organic', 'organic_search', 'Organic — Google'),
+            'total_in_reporting_currency' => 100.00,
+        ]);
+
+        $result = $this->service->getAttributedRevenue($this->workspace->id, $this->from, $this->to);
+
+        $this->assertEqualsWithDelta(0.00, $result['total_tagged'], 0.01);
+    }
+
+    public function test_no_attribution_excluded_from_tagged(): void
     {
         $this->insertOrder([
-            'utm_source'                  => null,
+            'attribution_source'          => null,
+            'attribution_last_touch'      => null,
             'total_in_reporting_currency' => 100.00,
         ]);
 
@@ -144,9 +189,23 @@ class RevenueAttributionServiceTest extends TestCase
 
     public function test_total_tagged_is_sum_of_channels(): void
     {
-        $this->insertOrder(['utm_source' => 'facebook', 'total_in_reporting_currency' => 100.00]);
-        $this->insertOrder(['external_id' => uniqid(), 'utm_source' => 'google', 'total_in_reporting_currency' => 200.00]);
-        $this->insertOrder(['external_id' => uniqid(), 'utm_source' => 'tiktok', 'total_in_reporting_currency' => 50.00]);
+        $this->insertOrder([
+            'attribution_source'          => 'wc_native',
+            'attribution_last_touch'      => $this->touch('facebook', 'cpc', 'paid_social', 'Paid — Facebook'),
+            'total_in_reporting_currency' => 100.00,
+        ]);
+        $this->insertOrder([
+            'external_id'                 => uniqid(),
+            'attribution_source'          => 'wc_native',
+            'attribution_last_touch'      => $this->touch('google', 'cpc', 'paid_search', 'Paid — Google Ads'),
+            'total_in_reporting_currency' => 200.00,
+        ]);
+        $this->insertOrder([
+            'external_id'                 => uniqid(),
+            'attribution_source'          => 'pys',
+            'attribution_last_touch'      => $this->touch('klaviyo', 'email', 'email', 'Email — Klaviyo'),
+            'total_in_reporting_currency' => 50.00,
+        ]);
 
         $result = $this->service->getAttributedRevenue($this->workspace->id, $this->from, $this->to);
 
@@ -160,8 +219,17 @@ class RevenueAttributionServiceTest extends TestCase
 
     public function test_null_total_in_reporting_currency_excluded(): void
     {
-        $this->insertOrder(['utm_source' => 'facebook', 'total_in_reporting_currency' => null]);
-        $this->insertOrder(['external_id' => uniqid(), 'utm_source' => 'facebook', 'total_in_reporting_currency' => 50.00]);
+        $this->insertOrder([
+            'attribution_source'          => 'wc_native',
+            'attribution_last_touch'      => $this->touch('facebook', 'cpc', 'paid_social', 'Paid — Facebook'),
+            'total_in_reporting_currency' => null,
+        ]);
+        $this->insertOrder([
+            'external_id'                 => uniqid(),
+            'attribution_source'          => 'wc_native',
+            'attribution_last_touch'      => $this->touch('facebook', 'cpc', 'paid_social', 'Paid — Facebook'),
+            'total_in_reporting_currency' => 50.00,
+        ]);
 
         $result = $this->service->getAttributedRevenue($this->workspace->id, $this->from, $this->to);
 
@@ -175,12 +243,18 @@ class RevenueAttributionServiceTest extends TestCase
             $this->insertOrder([
                 'external_id'                 => uniqid("order-{$status}-"),
                 'status'                      => $status,
-                'utm_source'                  => 'facebook',
+                'attribution_source'          => 'wc_native',
+                'attribution_last_touch'      => $this->touch('facebook', 'cpc', 'paid_social', 'Paid — Facebook'),
                 'total_in_reporting_currency' => 999.00,
             ]);
         }
         // Should be counted
-        $this->insertOrder(['utm_source' => 'facebook', 'status' => 'processing', 'total_in_reporting_currency' => 100.00]);
+        $this->insertOrder([
+            'status'                      => 'processing',
+            'attribution_source'          => 'wc_native',
+            'attribution_last_touch'      => $this->touch('facebook', 'cpc', 'paid_social', 'Paid — Facebook'),
+            'total_in_reporting_currency' => 100.00,
+        ]);
 
         $result = $this->service->getAttributedRevenue($this->workspace->id, $this->from, $this->to);
 
@@ -191,8 +265,19 @@ class RevenueAttributionServiceTest extends TestCase
     {
         $store2 = Store::factory()->create(['workspace_id' => $this->workspace->id]);
 
-        $this->insertOrder(['store_id' => $this->store->id, 'utm_source' => 'facebook', 'total_in_reporting_currency' => 100.00]);
-        $this->insertOrder(['store_id' => $store2->id, 'external_id' => uniqid(), 'utm_source' => 'facebook', 'total_in_reporting_currency' => 200.00]);
+        $this->insertOrder([
+            'store_id'                    => $this->store->id,
+            'attribution_source'          => 'wc_native',
+            'attribution_last_touch'      => $this->touch('facebook', 'cpc', 'paid_social', 'Paid — Facebook'),
+            'total_in_reporting_currency' => 100.00,
+        ]);
+        $this->insertOrder([
+            'external_id'                 => uniqid(),
+            'store_id'                    => $store2->id,
+            'attribution_source'          => 'wc_native',
+            'attribution_last_touch'      => $this->touch('facebook', 'cpc', 'paid_social', 'Paid — Facebook'),
+            'total_in_reporting_currency' => 200.00,
+        ]);
 
         $result = $this->service->getAttributedRevenue(
             $this->workspace->id, $this->from, $this->to, storeId: $this->store->id
@@ -203,10 +288,14 @@ class RevenueAttributionServiceTest extends TestCase
 
     public function test_empty_date_range_returns_zeros(): void
     {
-        $this->insertOrder(['utm_source' => 'facebook', 'total_in_reporting_currency' => 100.00]);
+        $this->insertOrder([
+            'attribution_source'          => 'wc_native',
+            'attribution_last_touch'      => $this->touch('facebook', 'cpc', 'paid_social', 'Paid — Facebook'),
+            'total_in_reporting_currency' => 100.00,
+        ]);
 
         $yesterday = Carbon::yesterday();
-        $result = $this->service->getAttributedRevenue(
+        $result    = $this->service->getAttributedRevenue(
             $this->workspace->id,
             $yesterday->copy()->startOfDay(),
             $yesterday->copy()->endOfDay(),
@@ -221,8 +310,17 @@ class RevenueAttributionServiceTest extends TestCase
 
     public function test_get_campaign_attributed_revenue_case_insensitive(): void
     {
-        $this->insertOrder(['utm_campaign' => 'SUMMER20', 'total_in_reporting_currency' => 120.00]);
-        $this->insertOrder(['external_id' => uniqid(), 'utm_campaign' => 'summer20', 'total_in_reporting_currency' => 80.00]);
+        $this->insertOrder([
+            'attribution_source'          => 'wc_native',
+            'attribution_last_touch'      => $this->touch('google', 'cpc', 'paid_search', 'Paid — Google Ads', 'SUMMER20'),
+            'total_in_reporting_currency' => 120.00,
+        ]);
+        $this->insertOrder([
+            'external_id'                 => uniqid(),
+            'attribution_source'          => 'pys',
+            'attribution_last_touch'      => $this->touch('facebook', 'cpc', 'paid_social', 'Paid — Facebook', 'summer20'),
+            'total_in_reporting_currency' => 80.00,
+        ]);
 
         $result = $this->service->getCampaignAttributedRevenue(
             $this->workspace->id, 'summer20', $this->from, $this->to,
@@ -233,8 +331,19 @@ class RevenueAttributionServiceTest extends TestCase
 
     public function test_get_campaign_attributed_revenue_only_active_orders(): void
     {
-        $this->insertOrder(['utm_campaign' => 'promo', 'status' => 'completed', 'total_in_reporting_currency' => 100.00]);
-        $this->insertOrder(['external_id' => uniqid(), 'utm_campaign' => 'promo', 'status' => 'refunded', 'total_in_reporting_currency' => 999.00]);
+        $this->insertOrder([
+            'attribution_source'          => 'wc_native',
+            'attribution_last_touch'      => $this->touch('google', 'cpc', 'paid_search', 'Paid — Google Ads', 'promo'),
+            'status'                      => 'completed',
+            'total_in_reporting_currency' => 100.00,
+        ]);
+        $this->insertOrder([
+            'external_id'                 => uniqid(),
+            'attribution_source'          => 'wc_native',
+            'attribution_last_touch'      => $this->touch('google', 'cpc', 'paid_search', 'Paid — Google Ads', 'promo'),
+            'status'                      => 'refunded',
+            'total_in_reporting_currency' => 999.00,
+        ]);
 
         $result = $this->service->getCampaignAttributedRevenue(
             $this->workspace->id, 'promo', $this->from, $this->to,
@@ -254,11 +363,12 @@ class RevenueAttributionServiceTest extends TestCase
         $this->assertEqualsWithDelta(600.0, $result, 0.01);
     }
 
-    public function test_get_unattributed_revenue_floors_at_zero(): void
+    public function test_get_unattributed_revenue_can_be_negative(): void
     {
-        // Tagged exceeds total (can happen with FX edge cases)
+        // Tagged exceeds total → negative result indicates platform over-reporting (iOS14 inflation).
+        // The value is intentionally NOT clamped so the Dashboard "Not Tracked" banner can surface it.
         $result = $this->service->getUnattributedRevenue(totalRevenue: 100.0, totalTagged: 150.0);
 
-        $this->assertEqualsWithDelta(0.0, $result, 0.01);
+        $this->assertEqualsWithDelta(-50.0, $result, 0.01);
     }
 }

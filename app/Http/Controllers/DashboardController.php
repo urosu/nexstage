@@ -126,9 +126,13 @@ class DashboardController extends Controller
         }
         $hasNullFx = $nullFxQuery->exists();
 
+        // Apply scope-aware annotation filtering: workspace-scoped notes always show;
+        // store-scoped notes only show when the matching store is in the active filter.
+        // @see PLANNING.md section 8 (scope-aware annotations)
         $notes = DailyNote::withoutGlobalScopes()
             ->where('workspace_id', $workspaceId)
             ->whereBetween('date', [$from, $to])
+            ->forAnnotationScope($storeIds)
             ->select(['date', 'note'])
             ->get()
             ->map(fn ($n) => ['date' => $n->date->toDateString(), 'note' => $n->note])
@@ -137,22 +141,48 @@ class DashboardController extends Controller
         // Holiday overlays: fetch from global holidays table for workspace's country.
         // Why: chart shows a gray vertical marker on holiday dates so users can
         // explain traffic/revenue dips without reaching for anomaly detection.
+        // When holiday_lead_days > 0, future holidays are shifted left so the marker
+        // appears X days before the actual holiday (ad ramp-up window).
+        $leadDays = $workspace->workspace_settings->holidayLeadDays;
+        $today    = now()->toDateString();
+        // Query window shifted forward by lead_days so holidays whose marker date (actual − lead_days)
+        // falls within [$from, $to] are all captured.
+        $queryFrom = $leadDays > 0 ? Carbon::parse($from)->addDays($leadDays)->toDateString() : $from;
+        $queryTo   = $leadDays > 0 ? Carbon::parse($to)->addDays($leadDays)->toDateString()   : $to;
         $holidays = $workspace->country
-            ? Holiday::whereBetween('date', [$from, $to])
+            ? Holiday::whereBetween('date', [$queryFrom, $queryTo])
                 ->where('country_code', $workspace->country)
-                ->select(['date', 'name'])
+                ->select(['date', 'name', 'type'])
                 ->orderBy('date')
                 ->get()
-                ->map(fn ($h) => ['date' => $h->date->toDateString(), 'name' => $h->name])
+                ->map(function ($h) use ($leadDays, $today) {
+                    $actualDate  = $h->date->toDateString();
+                    $displayDate = $leadDays > 0
+                        ? $h->date->copy()->subDays($leadDays)->toDateString()
+                        : $actualDate;
+
+                    return [
+                        'date'        => $displayDate,
+                        'name'        => $h->name,
+                        'type'        => $h->type,
+                        'is_upcoming' => $leadDays > 0 && $actualDate > $today,
+                        'lead_days'   => $leadDays,
+                        // Shown in the label so the user knows what they're advertising for.
+                        'actual_date' => $leadDays > 0 ? $h->date->format('M j') : null,
+                    ];
+                })
                 ->all()
             : [];
 
         // Workspace event overlays: promotions and expected spikes/drops created manually.
         // Fetch events overlapping the date range (can start before $from or end after $to).
+        // Scope filter applied: workspace-wide events always show; store/integration events
+        // only show when the matching entity is in the active filter selection.
         $workspaceEvents = WorkspaceEvent::withoutGlobalScopes()
             ->where('workspace_id', $workspaceId)
             ->where('date_from', '<=', $to)
             ->where('date_to', '>=', $from)
+            ->forAnnotationScope($storeIds)
             ->select(['date_from', 'date_to', 'name', 'event_type'])
             ->orderBy('date_from')
             ->get()
@@ -292,7 +322,7 @@ class DashboardController extends Controller
      * Aggregate snapshot + ad spend + attribution metrics for the given date range.
      *
      * Revenue and order totals come from daily_snapshots (pre-aggregated).
-     * Attribution uses orders.utm_source via RevenueAttributionService.
+     * Attribution uses orders.attribution_last_touch via RevenueAttributionService.
      * Ad metrics are always workspace-level (no FK between stores and ad_accounts).
      *
      * Return shape covers all four channel rows:
@@ -326,20 +356,17 @@ class DashboardController extends Controller
 
         // Campaign-level daily rows only — never mix levels; always workspace-wide.
         // Why: ad_insights has campaign + ad levels; summing both would double-count.
-        $adSpendReporting = (float) (AdInsight::withoutGlobalScopes()
+        $adSpendRow = AdInsight::withoutGlobalScopes()
             ->where('workspace_id', $workspaceId)
             ->where('level', 'campaign')
             ->whereBetween('date', [$from, $to])
             ->whereNull('hour')
-            ->sum('spend_in_reporting_currency') ?? 0);
+            ->selectRaw('SUM(spend_in_reporting_currency) AS spend_reporting, SUM(spend) AS spend_native')
+            ->first();
 
+        $adSpendReporting = (float) ($adSpendRow->spend_reporting ?? 0);
         // Marketing % uses native spend per PLANNING.md §Formulas.
-        $adSpendNative = (float) (AdInsight::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->where('level', 'campaign')
-            ->whereBetween('date', [$from, $to])
-            ->whereNull('hour')
-            ->sum('spend') ?? 0);
+        $adSpendNative    = (float) ($adSpendRow->spend_native    ?? 0);
 
         // UTM-attributed revenue — total_tagged covers all paid + other sources.
         $fromCarbon = Carbon::parse($from)->startOfDay();

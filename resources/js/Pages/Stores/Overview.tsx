@@ -1,5 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Head, router, usePage } from '@inertiajs/react';
+
+// Why: When Inertia swaps components via flushSync mid-navigation, the new component
+// initialises with useState(false) and renders stale cached data before the real server
+// response arrives. Tracking navigation state at module level lets us start with
+// navigating=true so the skeleton stays visible until the real data is ready.
+let _inertiaNavigating = false;
+router.on('start',  () => { _inertiaNavigating = true; });
+router.on('finish', () => { _inertiaNavigating = false; });
+
 import { AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import AppLayout from '@/Components/layouts/AppLayout';
@@ -60,7 +69,7 @@ export default function StoreOverview({
     const currency = workspace?.reporting_currency ?? 'EUR';
     const timezone = workspace?.reporting_timezone;
 
-    const [navigating, setNavigating] = useState(false);
+    const [navigating, setNavigating] = useState(() => _inertiaNavigating);
     const [showNotes, setShowNotes] = useState(true);
 
     useEffect(() => {
@@ -99,6 +108,7 @@ export default function StoreOverview({
                         value={metrics ? formatCurrency(metrics.revenue, currency) : null}
                         change={changes.revenue}
                         loading={navigating}
+                        tooltip="Completed and processing orders converted to your reporting currency."
                     />
                     <MetricCard
                         label="Orders"

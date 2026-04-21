@@ -17,6 +17,18 @@ return new class extends Migration
             $table->string('name');
             $table->string('slug', 255);
             $table->string('type', 50);
+
+            // Connector routing key — replaces the looser `type` column for any code added
+            // after Phase 1.5. DEFAULT covers existing WooCommerce stores.
+            // @see PLANNING.md section 5, 5.7
+            $table->string('platform', 32)->default('woocommerce');
+
+            // ISO 3166-1 alpha-2. NULL is valid — multi-country stores leave it blank.
+            // Three-tier fallback for ad-spend country attribution:
+            // COALESCE(campaigns.parsed_convention->>'country', stores.primary_country_code, 'UNKNOWN')
+            // @see PLANNING.md section 5.7
+            $table->char('primary_country_code', 2)->nullable();
+
             $table->string('domain');
 
             // Main store domain — used for country detection from ccTLD, PSI homepage
@@ -64,6 +76,7 @@ return new class extends Migration
         });
 
         DB::statement("ALTER TABLE stores ADD CONSTRAINT stores_type_check CHECK (type IN ('woocommerce','shopify','magento','bigcommerce','prestashop','opencart'))");
+        DB::statement("ALTER TABLE stores ADD CONSTRAINT stores_platform_check CHECK (platform IN ('woocommerce','shopify','magento','bigcommerce','prestashop','opencart'))");
         DB::statement("ALTER TABLE stores ADD CONSTRAINT stores_status_check CHECK (status IN ('connecting','active','error','disconnected'))");
         DB::statement("ALTER TABLE stores ADD CONSTRAINT stores_historical_import_status_check CHECK (historical_import_status IN ('pending','running','completed','failed'))");
     }

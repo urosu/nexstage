@@ -210,14 +210,10 @@ class RetryMissingConversionJob implements ShouldQueue
             }
 
             // Apply the multiplier to all NULL rows for this (currency, date) pair in one query.
-            $affected = DB::table('ad_insights')
-                ->where('workspace_id', $workspaceId)
-                ->whereNull('spend_in_reporting_currency')
-                ->where('currency', $currency)
-                ->whereDate('date', $date->toDateString())
-                ->update([
-                    'spend_in_reporting_currency' => DB::raw("ROUND(spend * {$multiplier}, 4)"),
-                ]);
+            $affected = DB::update(
+                'UPDATE ad_insights SET spend_in_reporting_currency = ROUND(spend * ?::numeric, 4) WHERE workspace_id = ? AND spend_in_reporting_currency IS NULL AND currency = ? AND date::date = ?',
+                [$multiplier, $workspaceId, $currency, $date->toDateString()],
+            );
 
             $converted += $affected;
         }
@@ -242,7 +238,11 @@ class RetryMissingConversionJob implements ShouldQueue
         $whens    = [];
 
         foreach ($updates as $u) {
-            $whens[]    = 'WHEN ? THEN ?';
+            // Cast the value to numeric so PostgreSQL accepts it for DECIMAL columns.
+            // PDO sends all bound parameters as text; without the explicit cast,
+            // PostgreSQL rejects the statement with "column is of type numeric but
+            // expression is of type text".
+            $whens[]    = 'WHEN ? THEN ?::numeric';
             $bindings[] = $u['id'];
             $bindings[] = $u[$column];
         }

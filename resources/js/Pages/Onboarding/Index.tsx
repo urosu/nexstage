@@ -34,7 +34,7 @@ interface ImportStatus {
 }
 
 interface Props {
-    step: 1 | 2 | 3;
+    step: 1 | 2 | 3 | 4;
     // step 1
     has_ads?: boolean;
     has_gsc?: boolean;
@@ -43,11 +43,20 @@ interface Props {
     gsc_pending?: Pending<string[]> | null;
     oauth_error?: string | null;
     oauth_platform?: string | null;
-    // step 2
+    // step 2 (country prompt)
     store_id?: number;
     store_name?: string;
-    // step 3
+    website_url?: string | null;
+    country?: string | null;
+    ip_detected_country?: string | null;
+    // step 4 (progress)
     store_slug?: string;
+    workspace_slug?: string;
+    // step 1 only — passed explicitly because shared `workspace`/`workspaces` props are null on
+    // onboarding routes (HandleInertiaRequests::share() runs before the controller sets WorkspaceContext)
+    has_other_workspaces?: boolean;
+    is_workspace_owner?: boolean;
+    current_workspace_id?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -70,10 +79,10 @@ function ConnectedBadge() {
 }
 
 // ---------------------------------------------------------------------------
-// Store Tile — WooCommerce connection form
+// Store Tile — WooCommerce or Shopify connection form
 // ---------------------------------------------------------------------------
 
-function StoreTile() {
+function WooCommerceForm() {
     const { data, setData, post, processing, errors } = useForm({
         domain: '',
         consumer_key: '',
@@ -86,21 +95,7 @@ function StoreTile() {
     }
 
     return (
-        <div className="rounded-lg border border-zinc-200 bg-white p-5">
-            <div className="mb-4 flex items-center gap-3">
-                {/* WooCommerce purple icon */}
-                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#7f54b3]/10">
-                    <svg className="h-5 w-5 text-[#7f54b3]" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M2.047 5.651C2.622 4.866 3.497 4.47 4.674 4.47h14.652c1.177 0 2.052.396 2.627 1.181.574.786.707 1.759.396 2.918l-2.363 9.48c-.265 1.018-.795 1.808-1.59 2.369-.796.562-1.712.844-2.75.844H8.354c-1.037 0-1.953-.282-2.75-.844-.795-.561-1.325-1.35-1.59-2.369L1.651 8.569c-.31-1.16-.178-2.132.396-2.918zM4.674 6.027c-.574 0-.97.18-1.19.54-.22.36-.245.858-.075 1.494l2.363 9.48c.17.575.47 1.013.902 1.314.432.3.939.451 1.52.451h7.612c.58 0 1.087-.15 1.52-.451.431-.301.731-.739.902-1.314l2.363-9.48c.17-.636.144-1.134-.075-1.494-.22-.36-.617-.54-1.19-.54H4.674z" />
-                        <path d="M6.5 9.5a1 1 0 011 1v1.5h1.5a1 1 0 010 2H7.5V15.5a1 1 0 01-2 0V14H4a1 1 0 010-2h1.5V10.5a1 1 0 011-1zm7.5 0a1 1 0 110 2 1 1 0 010-2zm2 3a1 1 0 110 2 1 1 0 010-2zm-4 0a1 1 0 110 2 1 1 0 010-2z" />
-                    </svg>
-                </div>
-                <div>
-                    <div className="text-sm font-semibold text-zinc-900">WooCommerce Store</div>
-                    <div className="text-xs text-zinc-500">Connect your ecommerce store</div>
-                </div>
-            </div>
-
+        <>
             <p className="mb-4 text-xs text-zinc-500">
                 Go to <strong>WooCommerce → Settings → Advanced → REST API</strong> and create
                 a key with <strong>Read/Write</strong> permissions.
@@ -154,6 +149,107 @@ function StoreTile() {
                     {processing ? 'Connecting…' : 'Connect store'}
                 </Button>
             </form>
+        </>
+    );
+}
+
+function ShopifyForm({ workspaceId }: { workspaceId?: number }) {
+    const [shop, setShop] = useState('');
+    const wsParam = workspaceId ? `&workspace_id=${workspaceId}` : '';
+
+    return (
+        <>
+            <p className="mb-4 text-xs text-zinc-500">
+                Enter your myshopify.com domain. You will be redirected to Shopify to approve
+                the connection.
+            </p>
+
+            <div className="space-y-3">
+                <div>
+                    <Label htmlFor="shopify-domain" className="text-xs">Shopify domain</Label>
+                    <Input
+                        id="shopify-domain"
+                        type="text"
+                        placeholder="my-store.myshopify.com"
+                        value={shop}
+                        className="mt-1 h-9 text-sm"
+                        onChange={(e) => setShop(e.target.value)}
+                        autoFocus
+                    />
+                </div>
+
+                <a
+                    href={route('shopify.install') + '?shop=' + encodeURIComponent(shop) + '&from=onboarding' + wsParam}
+                    className={[
+                        'flex w-full items-center justify-center rounded-md px-4 py-2 text-sm font-medium transition-colors',
+                        shop.trim()
+                            ? 'bg-[#008060] text-white hover:bg-[#006e52]'
+                            : 'pointer-events-none cursor-not-allowed bg-zinc-100 text-zinc-400',
+                    ].join(' ')}
+                    aria-disabled={!shop.trim()}
+                >
+                    Connect with Shopify
+                </a>
+            </div>
+        </>
+    );
+}
+
+function StoreTile({ workspaceId }: { workspaceId?: number }) {
+    const [platform, setPlatform] = useState<'woocommerce' | 'shopify'>('woocommerce');
+
+    return (
+        <div className="rounded-lg border border-zinc-200 bg-white p-5">
+            {/* Header */}
+            <div className="mb-4 flex items-center gap-3">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-zinc-100">
+                    <svg className="h-5 w-5 text-zinc-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 21v-7.5a.75.75 0 01.75-.75h3a.75.75 0 01.75.75V21m-4.5 0H2.36m11.14 0H18m0 0h3.64m-1.39 0V9.349m-16.5 11.65V9.35m0 0a3.001 3.001 0 003.75-.615A2.993 2.993 0 009.75 9.75c.896 0 1.7-.393 2.25-1.016a2.993 2.993 0 002.25 1.016c.896 0 1.7-.393 2.25-1.016a3.001 3.001 0 003.75.614m-16.5 0a3.004 3.004 0 01-.621-4.72L4.318 3.44A1.5 1.5 0 015.378 3h13.243a1.5 1.5 0 011.06.44l1.19 2.189a3 3 0 01-.621 4.72m-13.5 8.65h3.75a.75.75 0 00.75-.75V13.5a.75.75 0 00-.75-.75H6.75a.75.75 0 00-.75.75v3.75c0 .415.336.75.75.75z" />
+                    </svg>
+                </div>
+                <div>
+                    <div className="text-sm font-semibold text-zinc-900">Ecommerce Store</div>
+                    <div className="text-xs text-zinc-500">WooCommerce or Shopify</div>
+                </div>
+            </div>
+
+            {/* Platform toggle */}
+            <div className="mb-4 flex rounded-md border border-zinc-200 p-0.5">
+                <button
+                    type="button"
+                    onClick={() => setPlatform('woocommerce')}
+                    className={[
+                        'flex flex-1 items-center justify-center gap-1.5 rounded py-1.5 text-xs font-medium transition-colors',
+                        platform === 'woocommerce'
+                            ? 'bg-[#7f54b3] text-white'
+                            : 'text-zinc-500 hover:text-zinc-700',
+                    ].join(' ')}
+                >
+                    {/* WooCommerce W logo */}
+                    <svg className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M2.047 5.651C2.622 4.866 3.497 4.47 4.674 4.47h14.652c1.177 0 2.052.396 2.627 1.181.574.786.707 1.759.396 2.918l-2.363 9.48c-.265 1.018-.795 1.808-1.59 2.369-.796.562-1.712.844-2.75.844H8.354c-1.037 0-1.953-.282-2.75-.844-.795-.561-1.325-1.35-1.59-2.369L1.651 8.569c-.31-1.16-.178-2.132.396-2.918z" />
+                    </svg>
+                    WooCommerce
+                </button>
+                <button
+                    type="button"
+                    onClick={() => setPlatform('shopify')}
+                    className={[
+                        'flex flex-1 items-center justify-center gap-1.5 rounded py-1.5 text-xs font-medium transition-colors',
+                        platform === 'shopify'
+                            ? 'bg-[#008060] text-white'
+                            : 'text-zinc-500 hover:text-zinc-700',
+                    ].join(' ')}
+                >
+                    {/* Shopify bag icon */}
+                    <svg className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M15.337 2.088c-.054-.028-.19-.056-.352-.056-.163 0-.38.027-.569.082C14.225 1.406 13.576.78 12.715.78c-.027 0-.055 0-.081.002C12.443.296 12.036 0 11.575 0c-1.795 0-2.659 2.245-2.93 3.386-.692.214-1.182.366-1.234.383-.383.12-.394.132-.444.495C6.93 4.493 5 18.92 5 18.92L16.754 21 21 19.686S15.391 2.116 15.337 2.088zm-2.667.724c-.452.14-.959.298-1.467.455.283-1.093.823-1.622 1.298-1.83.172.44.222 1.064.169 1.375zm-.703-2.003c.084 0 .165.027.241.08-.583.274-1.208.967-1.47 2.348l-1.11.345c.31-1.06 1.04-2.773 2.339-2.773zM12.016 5.25c.467 0 .846.028 1.16.074l-.014.055c-.357 1.307-.507 1.842-.507 2.619 0 .777.406 1.33.812 1.852.314.402.61.78.61 1.215 0 .647-.457 1.128-.88 1.128-.611 0-.912-.46-.912-.46l-.285-2.005-1.038-.087-.195 2.006s-.307.546-.954.546c-.37 0-.778-.32-.778-1.128 0-.435.296-.813.61-1.215.406-.522.812-1.075.812-1.852 0-.777-.15-1.312-.507-2.62l-.014-.054c.314-.046.693-.074 1.16-.074h.92z"/>
+                    </svg>
+                    Shopify
+                </button>
+            </div>
+
+            {platform === 'woocommerce' ? <WooCommerceForm /> : <ShopifyForm workspaceId={workspaceId} />}
         </div>
     );
 }
@@ -457,6 +553,9 @@ function StepConnect({
     gadsPending,
     gscPending,
     oauthError,
+    hasOtherWorkspaces,
+    isWorkspaceOwner,
+    currentWorkspaceId,
 }: {
     hasAds: boolean;
     hasGsc: boolean;
@@ -464,6 +563,9 @@ function StepConnect({
     gadsPending: Pending<AdAccount[]> | null | undefined;
     gscPending: Pending<string[]> | null | undefined;
     oauthError: string | null | undefined;
+    hasOtherWorkspaces: boolean;
+    isWorkspaceOwner: boolean;
+    currentWorkspaceId: number | undefined;
 }) {
     const hasAnyConnection = hasAds || hasGsc;
     const { workspace } = usePage<PageProps>().props;
@@ -486,7 +588,7 @@ function StepConnect({
             )}
 
             <div className="mt-6 space-y-4">
-                <StoreTile />
+                <StoreTile workspaceId={currentWorkspaceId} />
                 <AdAccountsTile hasAds={hasAds} fbPending={fbPending} gadsPending={gadsPending} />
                 <GscTile hasGsc={hasGsc} gscPending={gscPending} />
             </div>
@@ -506,12 +608,183 @@ function StepConnect({
                     </p>
                 </div>
             )}
+
+            {/* Discard — only owners can discard; non-owners (invited members) cannot */}
+            {hasOtherWorkspaces && isWorkspaceOwner && !hasAnyConnection && (
+                <div className="mt-6 border-t border-zinc-100 pt-5 text-center">
+                    <button
+                        type="button"
+                        onClick={() => router.delete(route('workspaces.discard', { workspace: currentWorkspaceId }))}
+                        className="text-sm text-zinc-400 hover:text-zinc-600"
+                    >
+                        ← Cancel and go back
+                    </button>
+                </div>
+            )}
         </>
     );
 }
 
 // ---------------------------------------------------------------------------
-// Step 2 — Choose import date range
+// Step 2 — Store country prompt
+// ---------------------------------------------------------------------------
+
+/**
+ * Map common ccTLDs to ISO 3166-1 alpha-2 country codes.
+ * Used to pre-fill the dropdown from stores.website_url.
+ */
+const CCTLD_TO_COUNTRY: Record<string, string> = {
+    ac: 'GB', ad: 'AD', ae: 'AE', at: 'AT', au: 'AU', be: 'BE', bg: 'BG',
+    br: 'BR', ca: 'CA', ch: 'CH', cn: 'CN', cy: 'CY', cz: 'CZ', de: 'DE',
+    dk: 'DK', ee: 'EE', es: 'ES', fi: 'FI', fr: 'FR', gb: 'GB', gr: 'GR',
+    hr: 'HR', hu: 'HU', ie: 'IE', it: 'IT', jp: 'JP', kr: 'KR', lt: 'LT',
+    lu: 'LU', lv: 'LV', mt: 'MT', mx: 'MX', nl: 'NL', no: 'NO', nz: 'NZ',
+    pl: 'PL', pt: 'PT', ro: 'RO', ru: 'RU', se: 'SE', si: 'SI', sk: 'SK',
+    tr: 'TR', ua: 'UA', uk: 'GB',
+};
+
+const COUNTRY_OPTIONS: { code: string; name: string }[] = [
+    { code: 'AD', name: 'Andorra' },       { code: 'AE', name: 'UAE' },
+    { code: 'AT', name: 'Austria' },        { code: 'AU', name: 'Australia' },
+    { code: 'BE', name: 'Belgium' },        { code: 'BG', name: 'Bulgaria' },
+    { code: 'BR', name: 'Brazil' },         { code: 'CA', name: 'Canada' },
+    { code: 'CH', name: 'Switzerland' },    { code: 'CN', name: 'China' },
+    { code: 'CY', name: 'Cyprus' },         { code: 'CZ', name: 'Czech Republic' },
+    { code: 'DE', name: 'Germany' },        { code: 'DK', name: 'Denmark' },
+    { code: 'EE', name: 'Estonia' },        { code: 'ES', name: 'Spain' },
+    { code: 'FI', name: 'Finland' },        { code: 'FR', name: 'France' },
+    { code: 'GB', name: 'United Kingdom' }, { code: 'GR', name: 'Greece' },
+    { code: 'HR', name: 'Croatia' },        { code: 'HU', name: 'Hungary' },
+    { code: 'IE', name: 'Ireland' },        { code: 'IT', name: 'Italy' },
+    { code: 'JP', name: 'Japan' },          { code: 'KR', name: 'South Korea' },
+    { code: 'LT', name: 'Lithuania' },      { code: 'LU', name: 'Luxembourg' },
+    { code: 'LV', name: 'Latvia' },         { code: 'MT', name: 'Malta' },
+    { code: 'MX', name: 'Mexico' },         { code: 'NL', name: 'Netherlands' },
+    { code: 'NO', name: 'Norway' },         { code: 'NZ', name: 'New Zealand' },
+    { code: 'PL', name: 'Poland' },         { code: 'PT', name: 'Portugal' },
+    { code: 'RO', name: 'Romania' },        { code: 'RU', name: 'Russia' },
+    { code: 'SE', name: 'Sweden' },         { code: 'SI', name: 'Slovenia' },
+    { code: 'SK', name: 'Slovakia' },       { code: 'TR', name: 'Turkey' },
+    { code: 'UA', name: 'Ukraine' },        { code: 'US', name: 'United States' },
+];
+
+/** Detect a country code from a store URL by reading the ccTLD. Returns null for .com/.net/etc. */
+function detectCountryFromUrl(url: string | null): string | null {
+    if (!url) return null;
+    try {
+        const hostname = new URL(url.startsWith('http') ? url : `https://${url}`).hostname;
+        const parts = hostname.split('.');
+        const tld = parts[parts.length - 1].toLowerCase();
+        // Handle co.uk, co.nz, etc. — look for "co" + known ccTLD
+        if (parts.length >= 3 && parts[parts.length - 2].toLowerCase() === 'co') {
+            const ccTld = tld;
+            if (CCTLD_TO_COUNTRY[ccTld]) return CCTLD_TO_COUNTRY[ccTld];
+        }
+        return CCTLD_TO_COUNTRY[tld] ?? null;
+    } catch {
+        return null;
+    }
+}
+
+function StepCountry({
+    storeId,
+    storeName,
+    websiteUrl,
+    initialCountry,
+    ipDetectedCountry,
+}: {
+    storeId: number;
+    storeName: string;
+    websiteUrl: string | null;
+    initialCountry: string | null;
+    /** Country code detected from the user's IP on first login (lowest-priority fallback). */
+    ipDetectedCountry: string | null;
+}) {
+    const detected = detectCountryFromUrl(websiteUrl);
+    // Priority: stored DB value > ccTLD > IP geolocation
+    const [selected, setSelected] = useState<string>(initialCountry ?? detected ?? ipDetectedCountry ?? '');
+    const [processing, setProcessing] = useState(false);
+
+    function handleSave(e: React.FormEvent) {
+        e.preventDefault();
+        setProcessing(true);
+        router.post(
+            route('onboarding.country'),
+            { store_id: storeId, country_code: selected || null },
+            { onFinish: () => setProcessing(false) },
+        );
+    }
+
+    function handleSkip() {
+        setProcessing(true);
+        router.post(
+            route('onboarding.country'),
+            { store_id: storeId, country_code: null },
+            { onFinish: () => setProcessing(false) },
+        );
+    }
+
+    return (
+        <>
+            <Head title="Store setup" />
+
+            <h1 className="text-lg font-semibold text-zinc-900">Where does {storeName} mainly sell?</h1>
+            <p className="mt-1 text-sm text-zinc-500">
+                Used as a fallback when ad campaign names don't include a country code.
+                Multi-country stores can skip this.
+            </p>
+
+            {detected && !initialCountry && (
+                <p className="mt-3 text-xs text-zinc-400">
+                    Detected from <span className="font-mono">{websiteUrl}</span>
+                </p>
+            )}
+            {!detected && !initialCountry && ipDetectedCountry && (
+                <p className="mt-3 text-xs text-zinc-400">
+                    Pre-filled from your location — change if needed.
+                </p>
+            )}
+
+            <form onSubmit={handleSave} className="mt-6 space-y-5">
+                <div>
+                    <label className="mb-1.5 block text-xs font-medium text-zinc-500">
+                        Primary country
+                    </label>
+                    <select
+                        value={selected}
+                        onChange={(e) => setSelected(e.target.value)}
+                        className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                    >
+                        <option value="">Select a country…</option>
+                        {COUNTRY_OPTIONS.map((c) => (
+                            <option key={c.code} value={c.code}>
+                                {c.name} ({c.code})
+                            </option>
+                        ))}
+                    </select>
+                </div>
+
+                <Button type="submit" className="w-full" disabled={!selected || processing}>
+                    Continue →
+                </Button>
+            </form>
+
+            <div className="mt-4 text-center">
+                <button
+                    type="button"
+                    onClick={handleSkip}
+                    disabled={processing}
+                    className="text-sm text-zinc-400 hover:text-zinc-600"
+                >
+                    Skip for now
+                </button>
+            </div>
+        </>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Step 3 — Choose import date range
 // ---------------------------------------------------------------------------
 
 const PERIODS = [
@@ -623,7 +896,7 @@ function StepDateRange({
 }
 
 // ---------------------------------------------------------------------------
-// Step 3 — Import progress polling
+// Step 4 — Import progress polling
 // ---------------------------------------------------------------------------
 
 function formatDuration(seconds: number): string {
@@ -642,9 +915,8 @@ function formatEstimate(totalOrders: number, startedAt: string): string {
     return `~${Math.ceil(remaining / 60)} min`;
 }
 
-function StepProgress({ storeSlug }: { storeSlug: string }) {
-    const { workspace } = usePage<PageProps>().props;
-    const w = (path: string) => wurl(workspace?.slug, path);
+function StepProgress({ storeSlug, workspaceSlug }: { storeSlug: string; workspaceSlug: string }) {
+    const w = (path: string) => wurl(workspaceSlug, path);
     const [status, setStatus] = useState<ImportStatus>({
         status: null,
         progress: null,
@@ -737,7 +1009,7 @@ function StepProgress({ storeSlug }: { storeSlug: string }) {
 
                     {/* Stats */}
                     <div className="mt-4 grid grid-cols-2 gap-4 text-sm">
-                        {status.total_orders !== null && (
+                        {status.total_orders != null && (
                             <div>
                                 <div className="text-zinc-400">Total orders</div>
                                 <div className="font-medium text-zinc-900">
@@ -796,7 +1068,14 @@ export default function OnboardingIndex({
     oauth_platform: _oauth_platform,
     store_id,
     store_slug,
+    workspace_slug,
     store_name,
+    website_url,
+    country,
+    ip_detected_country,
+    has_other_workspaces,
+    is_workspace_owner,
+    current_workspace_id,
 }: Props) {
     return (
         <OnboardingLayout currentStep={step}>
@@ -808,12 +1087,26 @@ export default function OnboardingIndex({
                     gadsPending={gads_pending}
                     gscPending={gsc_pending}
                     oauthError={oauth_error}
+                    hasOtherWorkspaces={has_other_workspaces ?? false}
+                    isWorkspaceOwner={is_workspace_owner ?? false}
+                    currentWorkspaceId={current_workspace_id}
                 />
             )}
             {step === 2 && store_id && (
+                <StepCountry
+                    storeId={store_id}
+                    storeName={store_name ?? ''}
+                    websiteUrl={website_url ?? null}
+                    initialCountry={country ?? null}
+                    ipDetectedCountry={ip_detected_country ?? null}
+                />
+            )}
+            {step === 3 && store_id && (
                 <StepDateRange storeId={store_id} storeName={store_name ?? ''} />
             )}
-            {step === 3 && store_slug && <StepProgress storeSlug={store_slug} />}
+            {step === 4 && store_slug && workspace_slug && (
+                <StepProgress storeSlug={store_slug} workspaceSlug={workspace_slug} />
+            )}
         </OnboardingLayout>
     );
 }

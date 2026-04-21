@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useLayoutEffect, useRef, useMemo, useState } from 'react';
 import {
     LineChart,
     Line,
@@ -6,7 +6,6 @@ import {
     YAxis,
     CartesianGrid,
     Tooltip,
-    ResponsiveContainer,
     ReferenceLine,
     ReferenceArea,
 } from 'recharts';
@@ -26,6 +25,14 @@ export interface MultiSeriesPoint {
 export interface HolidayOverlay {
     date: string;
     name: string;
+    /** 'public' = national holiday via Yasumi; 'commercial' = ecommerce sale event */
+    type?: 'public' | 'commercial';
+    /** True when the marker has been shifted earlier and the actual holiday is still in the future */
+    is_upcoming?: boolean;
+    /** Days the marker was shifted left; 0 when no offset is configured */
+    lead_days?: number;
+    /** Formatted actual holiday date (e.g. "Dec 25") shown in the label when an offset is active */
+    actual_date?: string | null;
 }
 
 export interface WorkspaceEventOverlay {
@@ -41,18 +48,21 @@ interface SeriesConfig {
     key: SeriesKey;
     label: string;
     color: string;
-    /** left = currency axis, right = count/ratio axis */
-    yAxis: 'left' | 'right';
+    // Each incompatible metric group gets its own yAxisId so they don't crush each other.
+    // 'left'   = currency (revenue, aov, ad_spend) — log when multiple visible
+    // 'counts' = integer counts (orders, gsc_clicks) — same unit type, safe to share
+    // 'roas'   = ratio (×) — completely different scale from counts
+    yAxisId: 'left' | 'counts' | 'roas';
     valueType: 'currency' | 'number' | 'ratio';
 }
 
 const SERIES: SeriesConfig[] = [
-    { key: 'revenue',    label: 'Revenue',    color: 'var(--chart-1)', yAxis: 'left',  valueType: 'currency' },
-    { key: 'orders',     label: 'Orders',     color: 'var(--chart-5)', yAxis: 'right', valueType: 'number'   },
-    { key: 'aov',        label: 'AOV',        color: 'var(--chart-2)', yAxis: 'left',  valueType: 'currency' },
-    { key: 'ad_spend',   label: 'Ad Spend',   color: 'var(--chart-3)', yAxis: 'left',  valueType: 'currency' },
-    { key: 'roas',       label: 'ROAS',       color: 'var(--chart-4)', yAxis: 'right', valueType: 'ratio'    },
-    { key: 'gsc_clicks', label: 'GSC Clicks', color: 'var(--chart-2)', yAxis: 'right', valueType: 'number'   },
+    { key: 'revenue',    label: 'Revenue',    color: 'var(--chart-1)', yAxisId: 'left',   valueType: 'currency' },
+    { key: 'orders',     label: 'Orders',     color: 'var(--chart-5)', yAxisId: 'counts', valueType: 'number'   },
+    { key: 'aov',        label: 'AOV',        color: 'var(--chart-2)', yAxisId: 'left',   valueType: 'currency' },
+    { key: 'ad_spend',   label: 'Ad Spend',   color: 'var(--chart-3)', yAxisId: 'left',   valueType: 'currency' },
+    { key: 'roas',       label: 'ROAS',       color: 'var(--chart-4)', yAxisId: 'roas',   valueType: 'ratio'    },
+    { key: 'gsc_clicks', label: 'GSC Clicks', color: 'var(--chart-2)', yAxisId: 'counts', valueType: 'number'   },
 ];
 
 // ─── Overlay colors ────────────────────────────────────────────────────────────
@@ -125,7 +135,8 @@ const MultiSeriesLineChartInner = React.memo(function MultiSeriesLineChartInner(
     const [hoveredOverlay, setHoveredOverlay] = useState<{ label: string; x: number; y: number } | null>(null);
 
     // Overlay visibility toggles
-    const [showHolidays, setShowHolidays]           = useState(true);
+    const [showHolidays, setShowHolidays]             = useState(true);
+    const [showCommercialEvents, setShowCommercialEvents] = useState(true);
     const [showWorkspaceEvents, setShowWorkspaceEvents] = useState(true);
 
     // Zoom state
@@ -219,20 +230,48 @@ const MultiSeriesLineChartInner = React.memo(function MultiSeriesLineChartInner(
         });
     }, [displayData, displayComparison]);
 
-    const hasLeft  = SERIES.some((s) => s.yAxis === 'left'  && visible.has(s.key));
-    const hasRight = SERIES.some((s) => s.yAxis === 'right' && visible.has(s.key));
+    const containerRef = useRef<HTMLDivElement>(null);
+    const [chartSize, setChartSize] = useState<{ w: number; h: number } | null>(null);
+    useLayoutEffect(() => {
+        const el = containerRef.current;
+        if (!el) return;
+        const { width, height } = el.getBoundingClientRect();
+        if (width > 0) setChartSize({ w: width, h: height });
+        const ro = new ResizeObserver(([entry]) => {
+            const { inlineSize: w, blockSize: h } = entry.contentBoxSize[0];
+            setChartSize({ w, h });
+        });
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, []);
 
-    const leftSeries  = SERIES.filter((s) => s.yAxis === 'left');
-    const rightSeries = SERIES.filter((s) => s.yAxis === 'right');
+    const hasLeft   = SERIES.some((s) => s.yAxisId === 'left'   && visible.has(s.key));
+    const hasCounts = SERIES.some((s) => s.yAxisId === 'counts' && visible.has(s.key));
+    const hasRoas   = visible.has('roas');
+    const hasRight  = hasCounts || hasRoas;
+    // Log scale on left when multiple currency series are visible — AOV (€50) vs revenue (€10k)
+    // would otherwise flatten AOV to near zero on a linear axis.
+    const multipleLeft = SERIES.filter((s) => s.yAxisId === 'left' && visible.has(s.key)).length > 1;
+    // Show counts axis labels when counts are active; fall back to ROAS labels when only ROAS is visible.
+    const showCountsLabels = hasCounts;
+    const showRoasLabels   = hasRoas && !hasCounts;
 
     // Clamp event dates to visible data range when zoomed
     const displayFrom = displayData[0]?.date;
     const displayTo   = displayData[displayData.length - 1]?.date;
 
-    const visibleHolidays = useMemo(() => {
+    const visiblePublicHolidays = useMemo(() => {
         if (!holidays?.length) return [];
-        if (!displayFrom || !displayTo) return holidays;
-        return holidays.filter((h) => h.date >= displayFrom && h.date <= displayTo);
+        const pub = holidays.filter(h => !h.type || h.type === 'public');
+        if (!displayFrom || !displayTo) return pub;
+        return pub.filter((h) => h.date >= displayFrom && h.date <= displayTo);
+    }, [holidays, displayFrom, displayTo]);
+
+    const visibleCommercialEvents = useMemo(() => {
+        if (!holidays?.length) return [];
+        const comm = holidays.filter(h => h.type === 'commercial');
+        if (!displayFrom || !displayTo) return comm;
+        return comm.filter((h) => h.date >= displayFrom && h.date <= displayTo);
     }, [holidays, displayFrom, displayTo]);
 
     const visibleEvents = useMemo(() => {
@@ -243,8 +282,9 @@ const MultiSeriesLineChartInner = React.memo(function MultiSeriesLineChartInner(
         );
     }, [workspaceEvents, displayFrom, displayTo]);
 
-    const hasHolidayOverlays      = (holidays?.length ?? 0) > 0;
-    const hasWorkspaceEventOverlays = (workspaceEvents?.length ?? 0) > 0;
+    const hasPublicHolidayOverlays    = visiblePublicHolidays.length > 0 || (holidays?.some(h => !h.type || h.type === 'public') ?? false);
+    const hasCommercialEventOverlays  = visibleCommercialEvents.length > 0 || (holidays?.some(h => h.type === 'commercial') ?? false);
+    const hasWorkspaceEventOverlays   = (workspaceEvents?.length ?? 0) > 0;
 
     return (
         <div className={className ?? 'w-full'}>
@@ -273,7 +313,7 @@ const MultiSeriesLineChartInner = React.memo(function MultiSeriesLineChartInner(
                 })}
 
                 {/* Overlay toggles — only shown when there's relevant data */}
-                {hasHolidayOverlays && (
+                {hasPublicHolidayOverlays && (
                     <button
                         onClick={() => setShowHolidays((v) => !v)}
                         className={`flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors ${
@@ -283,7 +323,20 @@ const MultiSeriesLineChartInner = React.memo(function MultiSeriesLineChartInner(
                         }`}
                     >
                         <span className="h-1.5 w-1.5 rounded-full bg-zinc-400" />
-                        Holidays
+                        Public Holidays
+                    </button>
+                )}
+                {hasCommercialEventOverlays && (
+                    <button
+                        onClick={() => setShowCommercialEvents((v) => !v)}
+                        className={`flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors ${
+                            showCommercialEvents
+                                ? 'border-violet-300 bg-violet-50 text-violet-700'
+                                : 'border-zinc-200 bg-white text-zinc-400 hover:text-zinc-600'
+                        }`}
+                    >
+                        <span className="h-1.5 w-1.5 rounded-full bg-violet-400" />
+                        Sale Events
                     </button>
                 )}
                 {hasWorkspaceEventOverlays && (
@@ -317,6 +370,7 @@ const MultiSeriesLineChartInner = React.memo(function MultiSeriesLineChartInner(
             </div>
 
             <div
+                ref={containerRef}
                 className="relative h-64"
                 style={{ userSelect: isSelecting ? 'none' : undefined }}
             >
@@ -329,8 +383,9 @@ const MultiSeriesLineChartInner = React.memo(function MultiSeriesLineChartInner(
                         {hoveredOverlay.label}
                     </div>
                 )}
-                <ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{ width: 0, height: 1 }}>
-                    <LineChart
+                {chartSize && <LineChart
+                        width={chartSize.w}
+                        height={chartSize.h}
                         data={merged}
                         margin={{ top: 4, right: hasRight ? 56 : 8, left: 0, bottom: 0 }}
                         onMouseDown={handleMouseDown}
@@ -355,34 +410,48 @@ const MultiSeriesLineChartInner = React.memo(function MultiSeriesLineChartInner(
                             minTickGap={40}
                         />
 
-                        {/* Left Y-axis — currency */}
+                        {/* Left Y-axis — currency (revenue, aov, ad_spend).
+                            Log scale when multiple currency series are active so AOV (€50)
+                            isn't flattened against revenue (€10k+) on a linear axis. */}
                         <YAxis
                             yAxisId="left"
                             orientation="left"
+                            scale={multipleLeft ? 'log' : 'linear'}
+                            domain={multipleLeft ? [1, 'auto'] : [0, 'auto']}
+                            allowDataOverflow={multipleLeft}
                             tickLine={false}
                             axisLine={false}
                             tick={{ fontSize: 11, fill: '#a1a1aa' }}
-                            tickFormatter={(v) => {
-                                const first = leftSeries.find((s) => visible.has(s.key));
-                                return first ? formatAxis(v, first.valueType, currency) : String(v);
-                            }}
+                            tickFormatter={(v) => formatAxis(v, 'currency', currency)}
                             width={60}
                             hide={!hasLeft}
                         />
 
-                        {/* Right Y-axis — count / ratio */}
+                        {/* Counts axis — orders + gsc_clicks (same unit type, safe to share). */}
                         <YAxis
-                            yAxisId="right"
+                            yAxisId="counts"
                             orientation="right"
+                            domain={[0, 'auto']}
                             tickLine={false}
                             axisLine={false}
-                            tick={{ fontSize: 11, fill: '#a1a1aa' }}
-                            tickFormatter={(v) => {
-                                const first = rightSeries.find((s) => visible.has(s.key));
-                                return first ? formatAxis(v, first.valueType, currency) : String(v);
-                            }}
-                            width={52}
-                            hide={!hasRight}
+                            tick={{ fontSize: 11, fill: showCountsLabels ? '#a1a1aa' : 'transparent' }}
+                            tickFormatter={(v) => formatAxis(v, 'number', currency)}
+                            width={showCountsLabels ? 52 : 0}
+                            hide={!hasCounts}
+                        />
+
+                        {/* ROAS axis — ratio (~1–10×), incompatible scale with counts.
+                            Labels shown only when counts axis is not also active. */}
+                        <YAxis
+                            yAxisId="roas"
+                            orientation="right"
+                            domain={[0, 'auto']}
+                            tickLine={false}
+                            axisLine={false}
+                            tick={{ fontSize: 11, fill: showRoasLabels ? '#a1a1aa' : 'transparent' }}
+                            tickFormatter={(v) => formatAxis(v, 'ratio', currency)}
+                            width={showRoasLabels ? 52 : 0}
+                            hide={!hasRoas}
                         />
 
                         <Tooltip
@@ -424,25 +493,61 @@ const MultiSeriesLineChartInner = React.memo(function MultiSeriesLineChartInner(
                             />
                         )}
 
-                        {/* ── Holiday overlays — gray dashed vertical lines ───────────── */}
-                        {showHolidays && visibleHolidays.map(({ date, name }) => (
-                            <ReferenceLine
-                                key={`holiday-${date}`}
-                                x={date}
-                                yAxisId="left"
-                                stroke="#a1a1aa"
-                                strokeDasharray="3 3"
-                                strokeWidth={1}
-                                label={(props: object) => (
-                                    <OverlayMarker
-                                        {...(props as OverlayMarkerProps)}
-                                        label={name}
-                                        color="#a1a1aa"
-                                        onHoverChange={setHoveredOverlay}
-                                    />
-                                )}
-                            />
-                        ))}
+                        {/* ── Public holiday overlays — gray (past) or amber (upcoming/lead) ─── */}
+                        {showHolidays && visiblePublicHolidays.map(({ date, name, is_upcoming, lead_days, actual_date }) => {
+                            const color = is_upcoming ? '#f59e0b' : '#a1a1aa';
+                            const label = actual_date
+                                ? is_upcoming
+                                    ? `${name} · ${actual_date} (in ${lead_days}d)`
+                                    : `${name} · ${actual_date}`
+                                : name;
+                            return (
+                                <ReferenceLine
+                                    key={`holiday-${date}-${name}`}
+                                    x={date}
+                                    yAxisId="left"
+                                    stroke={color}
+                                    strokeDasharray="3 3"
+                                    strokeWidth={1}
+                                    label={(props: object) => (
+                                        <OverlayMarker
+                                            {...(props as OverlayMarkerProps)}
+                                            label={label}
+                                            color={color}
+                                            onHoverChange={setHoveredOverlay}
+                                        />
+                                    )}
+                                />
+                            );
+                        })}
+
+                        {/* ── Commercial event overlays — violet ──────────────────────── */}
+                        {showCommercialEvents && visibleCommercialEvents.map(({ date, name, is_upcoming, lead_days, actual_date }) => {
+                            const color = is_upcoming ? '#7c3aed' : '#a78bfa';
+                            const label = actual_date
+                                ? is_upcoming
+                                    ? `${name} · ${actual_date} (in ${lead_days}d)`
+                                    : `${name} · ${actual_date}`
+                                : name;
+                            return (
+                                <ReferenceLine
+                                    key={`commercial-${date}-${name}`}
+                                    x={date}
+                                    yAxisId="left"
+                                    stroke={color}
+                                    strokeDasharray="4 2"
+                                    strokeWidth={1}
+                                    label={(props: object) => (
+                                        <OverlayMarker
+                                            {...(props as OverlayMarkerProps)}
+                                            label={label}
+                                            color={color}
+                                            onHoverChange={setHoveredOverlay}
+                                        />
+                                    )}
+                                />
+                            );
+                        })}
 
                         {/* ── Workspace event overlays — blue shaded areas or lines ──── */}
                         {showWorkspaceEvents && visibleEvents.map((event) => {
@@ -526,7 +631,7 @@ const MultiSeriesLineChartInner = React.memo(function MultiSeriesLineChartInner(
                             visible.has(s.key) ? (
                                 <Line
                                     key={`compare_${s.key}`}
-                                    yAxisId={s.yAxis}
+                                    yAxisId={s.yAxisId}
                                     type="monotone"
                                     dataKey={`compare_${s.key}`}
                                     name={`compare_${s.key}`}
@@ -544,7 +649,7 @@ const MultiSeriesLineChartInner = React.memo(function MultiSeriesLineChartInner(
                             visible.has(s.key) ? (
                                 <Line
                                     key={s.key}
-                                    yAxisId={s.yAxis}
+                                    yAxisId={s.yAxisId}
                                     type="monotone"
                                     dataKey={s.key}
                                     name={s.key}
@@ -555,8 +660,7 @@ const MultiSeriesLineChartInner = React.memo(function MultiSeriesLineChartInner(
                                 />
                             ) : null,
                         )}
-                    </LineChart>
-                </ResponsiveContainer>
+                </LineChart>}
             </div>
         </div>
     );

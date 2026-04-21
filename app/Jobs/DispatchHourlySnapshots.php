@@ -26,8 +26,10 @@ class DispatchHourlySnapshots
             ->whereNull('workspaces.deleted_at')
             ->whereRaw('NOT (workspaces.trial_ends_at < NOW() AND workspaces.billing_plan IS NULL)')
             ->select(['stores.id', 'stores.workspace_id'])
-            ->each(static function (Store $store) use ($yesterday): void {
-                ComputeHourlySnapshotsJob::dispatch($store->id, $yesterday);
-            });
+            ->chunkById(500, static function ($stores) use ($yesterday): void {
+                foreach ($stores as $store) {
+                    ComputeHourlySnapshotsJob::dispatch($store->id, $yesterday);
+                }
+            }, 'stores.id');
     }
 }

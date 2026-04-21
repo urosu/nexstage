@@ -184,7 +184,9 @@ function UrlRow({
                 >
                     <ExternalLink className="h-3.5 w-3.5" />
                 </a>
-                {!storeUrl.is_homepage && (
+                {storeUrl.is_homepage ? (
+                    <div className="h-7 w-7" />
+                ) : (
                     <button
                         type="button"
                         onClick={handleRemove}
@@ -286,7 +288,7 @@ export default function StorePerformance({ store, store_urls, gsc_suggestions }:
                                             key={page}
                                             type="button"
                                             onClick={() => handleSuggestionClick(page)}
-                                            className="rounded-full border border-zinc-200 bg-zinc-50 px-3 py-1 text-xs text-zinc-600 hover:border-primary hover:text-primary transition-colors"
+                                            className="rounded-full border border-zinc-200 bg-zinc-50 px-3 py-1 text-xs text-zinc-600 hover:border-primary hover:text-primary transition-colors whitespace-nowrap"
                                         >
                                             {page}
                                         </button>

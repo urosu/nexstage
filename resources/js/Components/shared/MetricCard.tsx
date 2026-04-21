@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Link } from '@inertiajs/react';
 import {
     TrendingUp,
     TrendingDown,
@@ -9,6 +10,7 @@ import {
     Lightbulb,
     ChevronDown,
     ChevronUp,
+    ArrowRight,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { InfoTooltip } from './Tooltip';
@@ -82,7 +84,7 @@ const SOURCE_CONFIG: Record<
         // Amber was avoided: it reads as a warning signal.
         className: 'bg-violet-50 text-violet-500 border-violet-200',
         // Tooltip for newcomers — explains what "Real" means vs platform-reported numbers.
-        tooltip: 'Computed by Nexstage from your actual store orders and ad spend — not platform pixel attribution, which can over-report due to iOS14+ modeled conversions.',
+        tooltip: 'Cross-source estimate derived from your actual store orders and ad spend — not platform pixel attribution, which can over-report due to iOS14+ modeled conversions.',
     },
 };
 
@@ -174,6 +176,14 @@ export interface MetricCardProps {
     subtext?: string;
     tooltip?: string;
     helpLink?: string;
+    /**
+     * One-line interpretation/action copy rendered below the trend dots,
+     * e.g. "Held at 1.8x — below target." When paired with `actionHref`
+     * the line becomes a drill-down link with an arrow.
+     * @see PLANNING.md section 12 design principle 7 (action language)
+     */
+    actionLine?: string;
+    actionHref?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -196,12 +206,14 @@ const MetricCard = React.memo(function MetricCard({
     subtext,
     tooltip,
     helpLink,
+    actionLine,
+    actionHref,
 }: MetricCardProps) {
     const [expanded, setExpanded] = useState(false);
 
     if (loading) {
         return (
-            <div className="rounded-xl border border-zinc-200 bg-white p-5 space-y-3">
+            <div className="rounded-xl border border-zinc-200 bg-white p-5 space-y-3 shadow-sm">
                 <div className="h-3.5 w-24 rounded bg-zinc-100 animate-pulse" />
                 <div className="h-8 w-32 rounded bg-zinc-100 animate-pulse" />
                 <div className="h-3 w-16 rounded bg-zinc-100 animate-pulse" />
@@ -229,8 +241,8 @@ const MetricCard = React.memo(function MetricCard({
     }
 
     return (
-        <div className="rounded-xl border border-zinc-200 bg-white p-5 space-y-1">
-            {/* Header row: label + info tooltip + source badge */}
+        <div className="rounded-xl border border-zinc-200 bg-white p-5 space-y-1 shadow-sm hover:shadow-md transition-shadow">
+            {/* Header row: label + info tooltip + why-this-number trigger + source badge */}
             <div className="flex items-center justify-between gap-2">
                 <span className="flex items-center gap-1.5 text-sm font-medium text-zinc-400">
                     {label}
@@ -245,7 +257,7 @@ const MetricCard = React.memo(function MetricCard({
             {/* Value row — with optional /target notation */}
             <div
                 className={cn(
-                    'text-2xl font-semibold tabular-nums',
+                    'text-3xl font-bold tabular-nums',
                     targetColorClass || 'text-zinc-900',
                 )}
             >
@@ -288,6 +300,21 @@ const MetricCard = React.memo(function MetricCard({
                 <div className="pt-1">
                     <TrendDotStrip dots={trendDots} />
                 </div>
+            )}
+
+            {/* Action line — one-liner interpretation / drill-down link. */}
+            {actionLine && (
+                actionHref ? (
+                    <Link
+                        href={actionHref}
+                        className="mt-1 inline-flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-800 transition-colors"
+                    >
+                        <span>{actionLine}</span>
+                        <ArrowRight className="h-3 w-3" />
+                    </Link>
+                ) : (
+                    <p className="mt-1 text-xs text-zinc-500">{actionLine}</p>
+                )
             )}
 
             {/* Expandable slot */}

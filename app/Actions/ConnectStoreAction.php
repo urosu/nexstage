@@ -199,7 +199,7 @@ class ConnectStoreAction
 
     private function generateUniqueSlug(int $workspaceId, string $name): string
     {
-        $base = Str::slug($name) ?: 'store';
+        $base = Str::slug(str_replace('.', '-', $name)) ?: 'store';
 
         if (! Store::withoutGlobalScopes()->where('workspace_id', $workspaceId)->where('slug', $base)->exists()) {
             return $base;

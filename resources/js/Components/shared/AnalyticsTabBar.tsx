@@ -44,6 +44,12 @@ export function AnalyticsTabBar() {
             href: buildHref(w('/analytics/products'), params, ['from', 'to', 'store_ids']),
             matchPaths: [w('/analytics/products')],
         },
+        {
+            key: 'winners',
+            label: 'Winners & Losers',
+            href: buildHref(w('/analytics/winners'), params, ['from', 'to']),
+            matchPaths: [w('/analytics/winners')],
+        },
     ];
 
     return (

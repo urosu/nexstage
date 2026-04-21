@@ -63,8 +63,11 @@ class CreateWorkspaceActionTest extends TestCase
         $user      = User::factory()->create();
         $workspace = $this->action->handle($user, 'mystore.com');
 
+        // Slugs are random 32-char hex IDs (Cloudflare-style) — intentionally not
+        // name-derived to avoid leaking customer info across workspaces.
+        // @see CreateWorkspaceAction::generateUniqueSlug()
         $this->assertNotEmpty($workspace->slug);
-        $this->assertStringContainsString('mystore', $workspace->slug);
+        $this->assertMatchesRegularExpression('/^[0-9a-f]{32}$/', $workspace->slug);
     }
 
     public function test_slug_collision_appends_random_suffix(): void

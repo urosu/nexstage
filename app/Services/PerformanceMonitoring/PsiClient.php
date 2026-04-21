@@ -52,6 +52,12 @@ class PsiClient
      *     inp_ms: int|null,
      *     ttfb_ms: int|null,
      *     tbt_ms: int|null,
+     *     crux_source: string|null,
+     *     crux_lcp_p75_ms: int|null,
+     *     crux_inp_p75_ms: int|null,
+     *     crux_cls_p75: float|null,
+     *     crux_fcp_p75_ms: int|null,
+     *     crux_ttfb_p75_ms: int|null,
      *     raw_response: array<string,mixed>,
      *     api_version: string,
      * }
@@ -170,14 +176,11 @@ class PsiClient
         $clsRaw = $audits['cumulative-layout-shift']['numericValue'] ?? null;
         $cls    = $clsRaw !== null ? round((float) $clsRaw, 4) : null;
 
-        // INP: Lighthouse 13 removed the lab audit for interaction-to-next-paint.
-        // INP is inherently a field metric (requires real user interactions, not a simulated crawl).
-        // Fall back to the CrUX p75 value from loadingExperience when the lab audit is absent.
-        // Both values are in milliseconds so the column is semantically consistent.
-        $inpMs = $ms('interaction-to-next-paint')
-            ?? (isset($body['loadingExperience']['metrics']['INTERACTION_TO_NEXT_PAINT']['percentile'])
-                ? (int) $body['loadingExperience']['metrics']['INTERACTION_TO_NEXT_PAINT']['percentile']
-                : null);
+        // INP is a field metric — lab Lighthouse may or may not produce a value.
+        // CrUX field data is stored separately in crux_inp_p75_ms; inp_ms is lab-only.
+        $inpMs = $ms('interaction-to-next-paint');
+
+        $crux = $this->parseCrux($body);
 
         return [
             'performance_score'    => $scoreInt($categories['performance']    ?? null),
@@ -190,8 +193,73 @@ class PsiClient
             'inp_ms'               => $inpMs,
             'ttfb_ms'              => $ms('server-response-time'),
             'tbt_ms'               => $ms('total-blocking-time'),
+            'crux_source'          => $crux['source'],
+            'crux_lcp_p75_ms'      => $crux['lcp_ms'],
+            'crux_inp_p75_ms'      => $crux['inp_ms'],
+            'crux_cls_p75'         => $crux['cls'],
+            'crux_fcp_p75_ms'      => $crux['fcp_ms'],
+            'crux_ttfb_p75_ms'     => $crux['ttfb_ms'],
             'raw_response'         => $body,
             'api_version'          => self::API_VERSION,
+        ];
+    }
+
+    /**
+     * Extract CrUX field data from a PSI response.
+     *
+     * Tries URL-level (loadingExperience) first; falls back to origin-level
+     * (originLoadingExperience) when the URL has insufficient real-user traffic.
+     *
+     * CLS in CrUX is stored as integer × 100 (e.g. 0.10 CLS → percentile: 10).
+     * We normalise it to the same decimal(6,4) format as the lab cls_score column.
+     *
+     * EXPERIMENTAL_TIME_TO_FIRST_BYTE is Google's CrUX TTFB — included but treat
+     * with lower confidence; it is marked experimental in the API.
+     *
+     * @param  array<string,mixed> $body Full PSI API response
+     * @return array{source: string|null, lcp_ms: int|null, inp_ms: int|null, cls: float|null, fcp_ms: int|null, ttfb_ms: int|null}
+     */
+    private function parseCrux(array $body): array
+    {
+        $empty = ['source' => null, 'lcp_ms' => null, 'inp_ms' => null, 'cls' => null, 'fcp_ms' => null, 'ttfb_ms' => null];
+
+        $urlSection    = $body['loadingExperience']       ?? null;
+        $originSection = $body['originLoadingExperience'] ?? null;
+
+        // A section with no 'metrics' key (or empty metrics) means INSUFFICIENT_DATA.
+        $data   = null;
+        $source = null;
+
+        if (! empty($urlSection['metrics'])) {
+            $data   = $urlSection;
+            $source = 'url';
+        } elseif (! empty($originSection['metrics'])) {
+            $data   = $originSection;
+            $source = 'origin';
+        }
+
+        if ($data === null) {
+            return $empty;
+        }
+
+        $metrics = $data['metrics'];
+
+        $metricMs = static function (string $key) use ($metrics): ?int {
+            $v = $metrics[$key]['percentile'] ?? null;
+            return $v !== null ? (int) $v : null;
+        };
+
+        // CrUX CLS percentile is stored as actual_cls × 100 to avoid float encoding.
+        $clsRaw = $metrics['CUMULATIVE_LAYOUT_SHIFT_SCORE']['percentile'] ?? null;
+        $cls    = $clsRaw !== null ? round((float) $clsRaw / 100, 4) : null;
+
+        return [
+            'source'  => $source,
+            'lcp_ms'  => $metricMs('LARGEST_CONTENTFUL_PAINT_MS'),
+            'inp_ms'  => $metricMs('INTERACTION_TO_NEXT_PAINT'),
+            'cls'     => $cls,
+            'fcp_ms'  => $metricMs('FIRST_CONTENTFUL_PAINT_MS'),
+            'ttfb_ms' => $metricMs('EXPERIMENTAL_TIME_TO_FIRST_BYTE'),
         ];
     }
 }

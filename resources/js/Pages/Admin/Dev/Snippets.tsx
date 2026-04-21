@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Head } from '@inertiajs/react';
 import { Check, Clipboard } from 'lucide-react';
 import AppLayout from '@/Components/layouts/AppLayout';
@@ -21,18 +21,22 @@ const DEV_COMMANDS = [
     { label: 'Horizon',         cmd: 'docker exec -it nexstage-php php artisan horizon' },
     { label: 'Schedule',        cmd: 'docker exec -it nexstage-php php artisan schedule:work' },
     { label: 'Tinker',          cmd: 'docker exec -it nexstage-php php artisan tinker' },
-    { label: 'ngrok (OAuth)',   cmd: 'ngrok http https://127.0.0.1:443 --host-header=nexstage.dev.localhost --domain=tracey-unstiffened-leona.ngrok-free.dev' },
+    { label: 'ngrok (OAuth)',   cmd: 'ngrok http https://127.0.0.1:443 --url=tracey-unstiffened-leona.ngrok-free.dev --host-header=nexstage.dev.localhost' },
 ];
 
 // ─── Copy button ─────────────────────────────────────────────────────────────
 
 function CopyButton({ text }: { text: string }) {
     const [copied, setCopied] = useState(false);
+    const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
 
     const handleCopy = () => {
         navigator.clipboard.writeText(text);
         setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
+        if (timerRef.current) clearTimeout(timerRef.current);
+        timerRef.current = setTimeout(() => setCopied(false), 1500);
     };
 
     return (

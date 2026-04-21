@@ -20,6 +20,8 @@ class Store extends Model
         'name',
         'slug',
         'type',
+        'platform',
+        'primary_country_code',
         'domain',
         'currency',
         'timezone',

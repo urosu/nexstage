@@ -61,9 +61,11 @@ return new class extends Migration
         // ad-level rows must have ad_id set and campaign_id NULL.
         // Why: prevents double-counting spend when querying. Never SUM across both levels.
         // Note: if adset-level insights are added later (Phase 3+), this CHECK must be extended.
-        DB::statement("ALTER TABLE ad_insights ADD CONSTRAINT ad_insights_level_check CHECK (level IN ('campaign','ad'))");
+        DB::statement("ALTER TABLE ad_insights ADD CONSTRAINT ad_insights_level_check CHECK (level IN ('campaign','adset','ad'))");
         DB::statement("ALTER TABLE ad_insights ADD CONSTRAINT ad_insights_level_fk_check CHECK (
             (level = 'campaign' AND campaign_id IS NOT NULL AND ad_id IS NULL)
+            OR
+            (level = 'adset' AND adset_id IS NOT NULL AND campaign_id IS NULL AND ad_id IS NULL)
             OR
             (level = 'ad' AND ad_id IS NOT NULL AND campaign_id IS NULL)
         )");
@@ -71,8 +73,12 @@ return new class extends Migration
         // Partial unique indexes per level to enforce one row per (entity, date[, hour]).
         DB::statement("CREATE UNIQUE INDEX ai_campaign_daily_unique  ON ad_insights (campaign_id, date)       WHERE level='campaign' AND hour IS NULL");
         DB::statement("CREATE UNIQUE INDEX ai_campaign_hourly_unique ON ad_insights (campaign_id, date, hour) WHERE level='campaign' AND hour IS NOT NULL");
+        DB::statement("CREATE UNIQUE INDEX ai_adset_daily_unique     ON ad_insights (adset_id, date)          WHERE level='adset' AND hour IS NULL");
         DB::statement("CREATE UNIQUE INDEX ai_ad_daily_unique        ON ad_insights (ad_id, date)             WHERE level='ad' AND hour IS NULL");
         DB::statement("CREATE UNIQUE INDEX ai_ad_hourly_unique       ON ad_insights (ad_id, date, hour)       WHERE level='ad' AND hour IS NOT NULL");
+
+        // Composite index for adset controller queries
+        DB::statement("CREATE INDEX ad_insights_workspace_id_adset_id_date_index ON ad_insights (workspace_id, adset_id, date)");
     }
 
     public function down(): void

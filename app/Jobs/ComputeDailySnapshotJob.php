@@ -8,6 +8,7 @@ use App\Models\Workspace;
 use App\Services\WorkspaceContext;
 use Carbon\Carbon;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -33,12 +34,18 @@ use Illuminate\Support\Facades\Log;
  *
  * Constructor params: (int $storeId, Carbon $date)
  */
-class ComputeDailySnapshotJob implements ShouldQueue
+class ComputeDailySnapshotJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 600;
-    public int $tries   = 3;
+    public int $timeout   = 600;
+    public int $tries     = 3;
+    public int $uniqueFor = 660;
+
+    public function uniqueId(): string
+    {
+        return "{$this->storeId}:{$this->date->toDateString()}";
+    }
 
     public function __construct(
         private readonly int    $storeId,
@@ -75,6 +82,9 @@ class ComputeDailySnapshotJob implements ShouldQueue
             return;
         }
 
+        $dayStart = $dateStr . ' 00:00:00';
+        $dayEnd   = $dateStr . ' 23:59:59';
+
         // A. Core order metrics ---------------------------------------------------
         $core = DB::table('orders')
             ->selectRaw('
@@ -82,8 +92,9 @@ class ComputeDailySnapshotJob implements ShouldQueue
                 SUM(total_in_reporting_currency) AS revenue,
                 SUM(total)                       AS revenue_native
             ')
+            ->where('workspace_id', $workspaceId)
             ->where('store_id', $this->storeId)
-            ->whereRaw("occurred_at::date = ?", [$dateStr])
+            ->whereBetween('occurred_at', [$dayStart, $dayEnd])
             ->whereIn('status', ['completed', 'processing'])
             ->first();
 
@@ -98,8 +109,9 @@ class ComputeDailySnapshotJob implements ShouldQueue
         $items = DB::table('order_items as oi')
             ->join('orders as o', 'o.id', '=', 'oi.order_id')
             ->selectRaw('SUM(oi.quantity)::int AS items_sold')
+            ->where('o.workspace_id', $workspaceId)
             ->where('o.store_id', $this->storeId)
-            ->whereRaw("o.occurred_at::date = ?", [$dateStr])
+            ->whereBetween('o.occurred_at', [$dayStart, $dayEnd])
             ->whereIn('o.status', ['completed', 'processing'])
             ->first();
 
@@ -113,8 +125,9 @@ class ComputeDailySnapshotJob implements ShouldQueue
             WITH day_customers AS (
                 SELECT DISTINCT customer_email_hash
                 FROM orders
-                WHERE store_id = ?
-                  AND occurred_at::date = ?
+                WHERE workspace_id = ?
+                  AND store_id = ?
+                  AND occurred_at BETWEEN ? AND ?
                   AND status IN ('completed','processing')
                   AND customer_email_hash IS NOT NULL
             ),
@@ -123,6 +136,7 @@ class ComputeDailySnapshotJob implements ShouldQueue
                 FROM day_customers dc
                 JOIN orders o
                   ON o.customer_email_hash = dc.customer_email_hash
+                 AND o.workspace_id = ?
                  AND o.store_id = ?
                  AND o.status IN ('completed','processing')
                 GROUP BY dc.customer_email_hash
@@ -131,7 +145,7 @@ class ComputeDailySnapshotJob implements ShouldQueue
                 SUM(CASE WHEN first_date = ? THEN 1 ELSE 0 END)::int AS new_customers,
                 SUM(CASE WHEN first_date  < ? THEN 1 ELSE 0 END)::int AS returning_customers
             FROM first_appearances
-        ", [$this->storeId, $dateStr, $this->storeId, $dateStr, $dateStr]);
+        ", [$workspaceId, $this->storeId, $dayStart, $dayEnd, $workspaceId, $this->storeId, $dateStr, $dateStr]);
 
         $newCustomers       = (int) ($customerStats->new_customers ?? 0);
         $returningCustomers = (int) ($customerStats->returning_customers ?? 0);
@@ -149,8 +163,9 @@ class ComputeDailySnapshotJob implements ShouldQueue
                 SUM(oi.quantity)::int                                                      AS units,
                 SUM(oi.line_total * (o.total_in_reporting_currency / NULLIF(o.total, 0))) AS revenue
             ")
+            ->where('o.workspace_id', $workspaceId)
             ->where('o.store_id', $this->storeId)
-            ->whereRaw("o.occurred_at::date = ?", [$dateStr])
+            ->whereBetween('o.occurred_at', [$dayStart, $dayEnd])
             ->whereIn('o.status', ['completed', 'processing'])
             ->whereNotNull('o.total_in_reporting_currency')
             ->groupBy('oi.product_external_id')
@@ -206,6 +221,25 @@ class ComputeDailySnapshotJob implements ShouldQueue
                 ['store_id', 'snapshot_date', 'product_external_id'],
                 ['product_name', 'revenue', 'units', 'rank'],
             );
+
+            // Populate stock state from the current products row.
+            // Why: daily_snapshot_products records historical stock per day so
+            // DetectStockTransitionsJob (Phase 1.6) can diff consecutive days and
+            // DaysOfCover computations can weight by stock availability.
+            // stock_status / stock_quantity reflect the product's state at snapshot
+            // time (i.e. "end of day" as of the nightly job run).
+            // A separate UPDATE is used rather than embedding in the upsert so we
+            // don't need to fetch stock values into PHP — the DB join is cheaper.
+            DB::statement("
+                UPDATE daily_snapshot_products dsp
+                SET stock_status   = p.stock_status,
+                    stock_quantity = p.stock_quantity
+                FROM products p
+                WHERE p.store_id             = dsp.store_id
+                  AND p.external_id          = dsp.product_external_id
+                  AND dsp.store_id           = ?
+                  AND dsp.snapshot_date      = ?
+            ", [$this->storeId, $dateStr]);
         }
 
         Log::info('ComputeDailySnapshotJob: snapshot computed', [

@@ -22,7 +22,7 @@ use Illuminate\Support\Facades\Log;
 /**
  * Processes a single WooCommerce webhook delivery.
  *
- * Queue:   critical
+ * Queue:   critical-webhooks
  * Timeout: 30 s
  * Tries:   5
  * Backoff: [5, 15, 30, 60, 120] s
@@ -54,7 +54,7 @@ class ProcessWebhookJob implements ShouldQueue
         /** @var array<string, mixed> */
         private readonly array  $payload,
     ) {
-        $this->onQueue('critical');
+        $this->onQueue('critical-webhooks');
     }
 
     public function handle(UpsertWooCommerceOrderAction $orderAction, UpsertWooCommerceProductAction $productAction): void
@@ -76,7 +76,7 @@ class ProcessWebhookJob implements ShouldQueue
         }
 
         // --- Load store ------------------------------------------------------
-        $store = Store::find($this->storeId);
+        $store = Store::with('workspace')->find($this->storeId);
 
         if ($store === null) {
             $this->markLog('failed', 'Store not found');
@@ -95,11 +95,14 @@ class ProcessWebhookJob implements ShouldQueue
                 ),
                 'order.deleted'   => $this->handleOrderDeleted($externalEntityId),
                 'product.updated' => $productAction->handle($store, $this->payload),
+                default           => throw new \InvalidArgumentException("Unsupported webhook event: {$this->event}"),
             };
 
             Store::withoutGlobalScopes()
                 ->where('id', $this->storeId)
                 ->update(['last_synced_at' => now()]);
+
+            $this->stampWebhookDelivery();
 
             $this->markLog('processed', null);
         } catch (\Throwable $e) {
@@ -151,6 +154,31 @@ class ProcessWebhookJob implements ShouldQueue
                 'status'     => 'cancelled',
                 'updated_at' => now()->toDateTimeString(),
             ]);
+    }
+
+    /**
+     * Stamp store_webhooks.last_successful_delivery_at for the topic that just fired.
+     * Used by PollStoreOrdersJob to determine whether webhooks are still arriving
+     * before falling back to the API poll.
+     *
+     * The WC event "order.created" maps to the "order.created" topic row, etc.
+     * Uses DB::table to bypass WorkspaceScope — scoped by store_id instead.
+     */
+    private function stampWebhookDelivery(): void
+    {
+        try {
+            DB::table('store_webhooks')
+                ->where('store_id', $this->storeId)
+                ->where('topic', $this->event)
+                ->whereNull('deleted_at')
+                ->update(['last_successful_delivery_at' => now()->toDateTimeString()]);
+        } catch (\Throwable $e) {
+            Log::warning('ProcessWebhookJob: could not stamp last_successful_delivery_at', [
+                'store_id' => $this->storeId,
+                'event'    => $this->event,
+                'error'    => $e->getMessage(),
+            ]);
+        }
     }
 
     /**

@@ -1,5 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Head, Link, router, usePage } from '@inertiajs/react';
+
+// Why: When Inertia swaps components via flushSync mid-navigation, the new component
+// initialises with useState(false) and renders stale cached data before the real server
+// response arrives. Tracking navigation state at module level lets us start with
+// navigating=true so the skeleton stays visible until the real data is ready.
+let _inertiaNavigating = false;
+router.on('start',  () => { _inertiaNavigating = true; });
+router.on('finish', () => { _inertiaNavigating = false; });
 import { Search, ArrowUpDown } from 'lucide-react';
 import AppLayout from '@/Components/layouts/AppLayout';
 import { DateRangePicker } from '@/Components/shared/DateRangePicker';
@@ -10,6 +18,7 @@ import { formatCurrency, formatNumber } from '@/lib/formatters';
 import { cn } from '@/lib/utils';
 import { syncDotClass, syncDotTitle } from '@/lib/syncStatus';
 import { formatGscProperty, getGscPropertyType } from '@/lib/gsc';
+import { wurl } from '@/lib/workspace-url';
 import type { PageProps } from '@/types';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -60,6 +69,10 @@ interface Props {
     top_queries: QueryRow[];
     top_pages: PageRow[];
     summary: Summary | null;
+    organic_revenue: number | null;
+    organic_orders: number;
+    organic_cvr: number | null;
+    organic_aov: number | null;
     total_revenue: number | null;
     unattributed_revenue: number | null;
     from: string;
@@ -69,10 +82,6 @@ interface Props {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function navigate(params: Record<string, string | undefined | number>) {
-    router.get('/seo', params as Record<string, string>, { preserveState: true, replace: true });
-}
 
 function fmtCtr(v: number | null) {
     return v != null ? `${(v * 100).toFixed(2)}%` : '—';
@@ -121,6 +130,15 @@ function SortTh({
 
 // ─── GSC data table ───────────────────────────────────────────────────────────
 
+/**
+ * Estimate organic revenue for a query/page row: clicks × CVR × AOV.
+ * Returns null when organic CVR/AOV unavailable (no organic orders in period).
+ */
+function estimateOrgRevenue(clicks: number, cvr: number | null, aov: number | null): number | null {
+    if (cvr === null || aov === null || clicks === 0) return null;
+    return clicks * cvr * aov;
+}
+
 function GscTable<T extends { clicks: number; impressions: number; ctr: number | null; position: number | null }>({
     rows,
     labelKey,
@@ -129,6 +147,9 @@ function GscTable<T extends { clicks: number; impressions: number; ctr: number |
     sortDir,
     onSort,
     renderLabel,
+    organicCvr,
+    organicAov,
+    currency,
 }: {
     rows: T[];
     labelKey: keyof T;
@@ -137,41 +158,58 @@ function GscTable<T extends { clicks: number; impressions: number; ctr: number |
     sortDir: 'asc' | 'desc';
     onSort: (col: string) => void;
     renderLabel: (row: T) => React.ReactNode;
+    organicCvr?: number | null;
+    organicAov?: number | null;
+    currency?: string;
 }) {
+    const showEstRevenue = organicCvr != null && organicAov != null;
     return (
         <div className="overflow-x-auto">
             <table className="w-full text-sm">
                 <thead>
                     <tr>
-                        <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wide text-zinc-400">
+                        <th className="px-4 py-3 text-left th-label">
                             {labelHeader}
                         </th>
                         <SortTh col="clicks"      label="Clicks"      currentSort={sort} currentDir={sortDir} onSort={onSort} className="text-right" />
                         <SortTh col="impressions" label="Impressions"  currentSort={sort} currentDir={sortDir} onSort={onSort} className="text-right" />
                         <SortTh col="ctr"         label="CTR"         currentSort={sort} currentDir={sortDir} onSort={onSort} className="text-right" />
                         <SortTh col="position"    label="Position"    currentSort={sort} currentDir={sortDir} onSort={onSort} className="text-right" />
+                        {showEstRevenue && (
+                            <th className="px-4 py-3 text-right th-label" title="Estimated organic revenue: clicks × organic CVR × organic AOV. Displayed as a range estimate.">
+                                Est. Revenue
+                            </th>
+                        )}
                     </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-100">
-                    {rows.map((row, idx) => (
-                        <tr key={idx} className="hover:bg-zinc-50">
-                            <td className="max-w-[280px] px-4 py-3 text-zinc-800">
-                                {renderLabel(row)}
-                            </td>
-                            <td className="px-4 py-3 text-right tabular-nums text-zinc-700">
-                                {formatNumber(row.clicks)}
-                            </td>
-                            <td className="px-4 py-3 text-right tabular-nums text-zinc-700">
-                                {formatNumber(row.impressions)}
-                            </td>
-                            <td className="px-4 py-3 text-right tabular-nums text-zinc-700">
-                                {fmtCtr(row.ctr)}
-                            </td>
-                            <td className="px-4 py-3 text-right tabular-nums text-zinc-700">
-                                {fmtPos(row.position)}
-                            </td>
-                        </tr>
-                    ))}
+                    {rows.map((row) => {
+                        const estRev = showEstRevenue ? estimateOrgRevenue(row.clicks, organicCvr!, organicAov!) : null;
+                        return (
+                            <tr key={(row as unknown as QueryRow).query ?? (row as unknown as PageRow).page} className="hover:bg-zinc-50">
+                                <td className="max-w-[280px] px-4 py-3 text-zinc-800">
+                                    {renderLabel(row)}
+                                </td>
+                                <td className="px-4 py-3 text-right tabular-nums text-zinc-700">
+                                    {formatNumber(row.clicks)}
+                                </td>
+                                <td className="px-4 py-3 text-right tabular-nums text-zinc-700">
+                                    {formatNumber(row.impressions)}
+                                </td>
+                                <td className="px-4 py-3 text-right tabular-nums text-zinc-700">
+                                    {fmtCtr(row.ctr)}
+                                </td>
+                                <td className="px-4 py-3 text-right tabular-nums text-zinc-700">
+                                    {fmtPos(row.position)}
+                                </td>
+                                {showEstRevenue && (
+                                    <td className="px-4 py-3 text-right tabular-nums text-zinc-500">
+                                        {estRev != null ? `~${formatCurrency(estRev, currency ?? 'EUR')}` : '—'}
+                                    </td>
+                                )}
+                            </tr>
+                        );
+                    })}
                 </tbody>
             </table>
         </div>
@@ -184,6 +222,10 @@ export default function SeoIndex(props: Props) {
     const { workspace } = usePage<PageProps>().props;
     const currency = workspace?.reporting_currency ?? 'EUR';
 
+    function navigate(params: Record<string, string | undefined | number>) {
+        router.get(wurl(workspace?.slug, '/seo'), params as Record<string, string>, { preserveState: true, replace: true });
+    }
+
     const {
         properties,
         selected_property_ids,
@@ -191,6 +233,9 @@ export default function SeoIndex(props: Props) {
         top_queries,
         top_pages,
         summary,
+        organic_revenue,
+        organic_cvr,
+        organic_aov,
         total_revenue,
         unattributed_revenue,
         from,
@@ -199,7 +244,7 @@ export default function SeoIndex(props: Props) {
         sort_dir,
     } = props;
 
-    const [navigating, setNavigating] = useState(false);
+    const [navigating, setNavigating] = useState(() => _inertiaNavigating);
 
     useEffect(() => {
         const off1 = router.on('start',  () => setNavigating(true));
@@ -308,7 +353,7 @@ export default function SeoIndex(props: Props) {
                             )}
                             title={`${p.property_url} — ${syncDotTitle(p.status, p.last_synced_at)}`}
                         >
-                            <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', syncDotClass(p.status, p.last_synced_at))} />
+                            <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', syncDotClass(p.status, p.last_synced_at, 'gsc'))} />
                             {formatGscProperty(p.property_url)}
                             {(() => {
                                 const isDomain = getGscPropertyType(p.property_url) === 'domain';
@@ -333,48 +378,41 @@ export default function SeoIndex(props: Props) {
                 </div>
             )}
 
-            {/* ── Revenue context cards (only when store is connected) ── */}
-            {(total_revenue !== null || unattributed_revenue !== null) && (
-                <div className="mb-4 grid grid-cols-2 gap-4">
-                    <MetricCard
-                        label="Total Store Revenue"
-                        value={total_revenue !== null ? formatCurrency(total_revenue, currency) : null}
-                        loading={navigating}
-                        tooltip="Total revenue from your store for the selected period, from daily snapshots."
-                    />
-                    <MetricCard
-                        label="Unattributed Revenue"
-                        value={unattributed_revenue !== null ? formatCurrency(unattributed_revenue, currency) : null}
-                        loading={navigating}
-                        tooltip="Revenue not linked to a tracked ad campaign. Includes organic search, direct, email campaigns (Klaviyo, Mailchimp), affiliates, and any other untagged traffic. To separate email revenue, ensure your email campaigns use UTM parameters with utm_medium=email."
-                    />
-                </div>
-            )}
-
-            {/* ── Summary cards ── */}
-            <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
+            {/* ── Hero cards (5 cards per PLANNING 12.5) ── */}
+            <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-5">
                 <MetricCard
                     label="Total Clicks"
+                    source="gsc"
                     value={summary ? formatNumber(summary.clicks) : null}
                     loading={navigating}
                 />
                 <MetricCard
                     label="Total Impressions"
+                    source="gsc"
                     value={summary ? formatNumber(summary.impressions) : null}
                     loading={navigating}
                 />
                 <MetricCard
                     label="Avg CTR"
+                    source="gsc"
                     value={summary?.ctr != null ? `${(summary.ctr * 100).toFixed(2)}%` : null}
                     loading={navigating}
                     tooltip="Click-Through Rate. Percentage of Google Search impressions that resulted in a click to your site."
                 />
                 <MetricCard
                     label="Avg Position"
+                    source="gsc"
                     value={summary?.position != null ? summary.position.toFixed(1) : null}
                     loading={navigating}
                     invertTrend
-                    tooltip="Average ranking position in Google Search results for the selected period. Lower is better — position 1 means top result. Google Search Console data has a 2–3 day lag."
+                    tooltip="Average ranking position in Google Search results. Lower is better — position 1 = top result."
+                />
+                <MetricCard
+                    label="Organic Revenue"
+                    source="real"
+                    value={organic_revenue != null ? formatCurrency(organic_revenue, currency) : null}
+                    loading={navigating}
+                    tooltip="Revenue from orders attributed to organic search via UTM tracking (channel_type = organic_search)."
                 />
             </div>
 
@@ -418,6 +456,9 @@ export default function SeoIndex(props: Props) {
                             sort={sort}
                             sortDir={sort_dir}
                             onSort={setSort}
+                            organicCvr={organic_cvr}
+                            organicAov={organic_aov}
+                            currency={currency}
                             renderLabel={(row) => (
                                 <span className="block truncate text-sm text-zinc-800" title={row.query}>
                                     {row.query}
@@ -447,6 +488,9 @@ export default function SeoIndex(props: Props) {
                             sort={sort}
                             sortDir={sort_dir}
                             onSort={setSort}
+                            organicCvr={organic_cvr}
+                            organicAov={organic_aov}
+                            currency={currency}
                             renderLabel={(row) => {
                                 let display = row.page;
                                 try {

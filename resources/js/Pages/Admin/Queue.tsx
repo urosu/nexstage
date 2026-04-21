@@ -198,7 +198,7 @@ export default function Queue({
                 ) : (
                     <div className="overflow-hidden rounded-xl border border-zinc-200 bg-white">
                         <table className="w-full text-sm">
-                            <thead className="border-b border-zinc-100 bg-zinc-50 text-xs font-medium uppercase tracking-wide text-zinc-400">
+                            <thead className="border-b border-zinc-100 bg-zinc-50 th-label">
                                 <tr>
                                     <th className="px-4 py-2.5 text-left">Job</th>
                                     <th className="px-4 py-2.5 text-left">Queue</th>

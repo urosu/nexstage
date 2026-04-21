@@ -139,7 +139,7 @@ class WooCommerceConnector implements StoreConnector
      *
      * @return int Number of orders processed.
      */
-    public function syncOrders(Carbon $since): int
+    public function syncOrders(Carbon $since, ?Carbon $until = null): int
     {
         $modifiedAfter = $since->utc()->toIso8601String();
         $orders        = $this->client->fetchModifiedOrders($modifiedAfter);
@@ -267,6 +267,55 @@ class WooCommerceConnector implements StoreConnector
     }
 
     // -------------------------------------------------------------------------
+    // Capability flags
+    // -------------------------------------------------------------------------
+
+    /**
+     * Returns true once at least one order item has been synced with a non-null
+     * unit_cost, indicating that one of the three supported WC COGS plugins is
+     * writing cost data into order item meta.
+     *
+     * Detection is lazy: the flag becomes true after the first successful COGS
+     * sync, not before. This avoids the overhead of querying the WC API on every
+     * page load, and is reliable because CogsReaderService only writes positive
+     * non-zero values.
+     *
+     * @see PLANNING.md section 7
+     */
+    public function supportsHistoricalCogs(): bool
+    {
+        return DB::table('order_items')
+            ->join('orders', 'order_items.order_id', '=', 'orders.id')
+            ->where('orders.store_id', $this->store->id)
+            ->whereNotNull('order_items.unit_cost')
+            ->exists();
+    }
+
+    /**
+     * WooCommerce (single-touch baseline) provides last-touch UTMs, referrer URL,
+     * and landing page. PYS additionally surfaces first-touch, but as a parser
+     * source — the connector itself does not expose first-touch natively.
+     *
+     * @return list<string>
+     * @see PLANNING.md section 6
+     */
+    public function supportedAttributionFeatures(): array
+    {
+        return ['last_touch', 'referrer_url', 'landing_page'];
+    }
+
+    /**
+     * WooCommerce is single-touch only. PYS provides first + last but not a
+     * full click-by-click journey, so multi-touch remains false.
+     *
+     * @see PLANNING.md section 6
+     */
+    public function supportsMultiTouch(): bool
+    {
+        return false;
+    }
+
+    // -------------------------------------------------------------------------
     // Private helpers
     // -------------------------------------------------------------------------
 
@@ -308,6 +357,7 @@ class WooCommerceConnector implements StoreConnector
                 'store_id'            => $this->store->id,
                 'external_id'         => (string) $product['id'],
                 'name'                => mb_substr((string) ($product['name'] ?? ''), 0, 500),
+                'slug'                => $this->nullableString($product['slug'] ?? null),
                 'sku'                 => $this->nullableString($product['sku'] ?? null),
                 'price'               => $price,
                 'status'              => $this->nullableString($product['status'] ?? null),
@@ -326,7 +376,7 @@ class WooCommerceConnector implements StoreConnector
             $rows,
             uniqueBy: ['store_id', 'external_id'],
             update: [
-                'name', 'sku', 'price', 'status', 'image_url', 'product_url',
+                'name', 'slug', 'sku', 'price', 'status', 'image_url', 'product_url',
                 'stock_status', 'stock_quantity', 'product_type',
                 'platform_updated_at', 'updated_at',
             ],

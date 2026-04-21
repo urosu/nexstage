@@ -27,7 +27,7 @@ use Throwable;
 /**
  * Imports the full GSC history for a Search Console property.
  *
- * Queue:   low
+ * Queue:   imports
  * Timeout: 7200 s (2 hours)
  * Tries:   5
  * Backoff: default [60, 300, 900] s
@@ -65,7 +65,7 @@ class GscHistoricalImportJob implements ShouldQueue
         private readonly int $workspaceId,
         private ?int         $syncLogId = null,
     ) {
-        $this->onQueue('low');
+        $this->onQueue('imports');
     }
 
     public function handle(): void
@@ -435,12 +435,13 @@ class GscHistoricalImportJob implements ShouldQueue
         }
 
         return SyncLog::create([
-            'workspace_id'  => $this->workspaceId,
-            'syncable_type' => $syncableType,
-            'syncable_id'   => $syncableId,
-            'job_type'      => self::class,
-            'queue'         => 'low',
-            'attempt'       => $this->attempts(),
+            'workspace_id'    => $this->workspaceId,
+            'syncable_type'   => $syncableType,
+            'syncable_id'     => $syncableId,
+            'job_type'        => self::class,
+            'queue'           => $this->queue,
+            'attempt'         => $this->attempts(),
+            'timeout_seconds' => $this->timeout,
             ...$fields,
         ]);
     }
@@ -461,6 +462,11 @@ class GscHistoricalImportJob implements ShouldQueue
         }
 
         app(WorkspaceContext::class)->set($this->workspaceId);
+
+        SearchConsoleProperty::withoutGlobalScopes()
+            ->where('id', $this->propertyId)
+            ->where('historical_import_status', 'running')
+            ->update(['historical_import_status' => 'failed']);
 
         SyncLog::withoutGlobalScopes()
             ->where('syncable_type', SearchConsoleProperty::class)

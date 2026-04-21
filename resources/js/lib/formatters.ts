@@ -2,14 +2,14 @@ export type Granularity = 'hourly' | 'daily' | 'weekly';
 
 export function formatCurrency(amount: number, currency: string, compact = false): string {
     if (compact && Math.abs(amount) >= 1000) {
-        return new Intl.NumberFormat('en', {
+        return new Intl.NumberFormat('de-DE', {
             style: 'currency',
             currency,
             notation: 'compact',
             maximumFractionDigits: 1,
         }).format(amount);
     }
-    return new Intl.NumberFormat('en', {
+    return new Intl.NumberFormat('de-DE', {
         style: 'currency',
         currency,
         minimumFractionDigits: 2,
@@ -36,25 +36,30 @@ export function formatPercent(value: number): string {
 }
 
 /** Format a datetime string or Date as "DD.MM.YYYY HH:mm" in 24h. */
-export function formatDatetime(date: string | Date | null | undefined): string {
+export function formatDatetime(date: string | Date | null | undefined, timezone?: string): string {
     if (!date) return '—';
     const d = typeof date === 'string' ? new Date(date) : date;
-    const day   = String(d.getDate()).padStart(2, '0');
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const year  = d.getFullYear();
-    const hours = String(d.getHours()).padStart(2, '0');
-    const mins  = String(d.getMinutes()).padStart(2, '0');
-    return `${day}.${month}.${year} ${hours}:${mins}`;
+    const opts: Intl.DateTimeFormatOptions = {
+        day: '2-digit', month: '2-digit', year: 'numeric',
+        hour: '2-digit', minute: '2-digit', hour12: false,
+        ...(timezone ? { timeZone: timezone } : {}),
+    };
+    const parts = new Intl.DateTimeFormat('de-DE', opts).formatToParts(d);
+    const get = (type: string) => parts.find(p => p.type === type)?.value ?? '';
+    return `${get('day')}.${get('month')}.${get('year')} ${get('hour')}:${get('minute')}`;
 }
 
 /** Format a date-only string or Date as "DD.MM.YYYY". */
-export function formatDateOnly(date: string | Date | null | undefined): string {
+export function formatDateOnly(date: string | Date | null | undefined, timezone?: string): string {
     if (!date) return '—';
     const d = typeof date === 'string' ? new Date(date) : date;
-    const day   = String(d.getDate()).padStart(2, '0');
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const year  = d.getFullYear();
-    return `${day}.${month}.${year}`;
+    const opts: Intl.DateTimeFormatOptions = {
+        day: '2-digit', month: '2-digit', year: 'numeric',
+        ...(timezone ? { timeZone: timezone } : {}),
+    };
+    const parts = new Intl.DateTimeFormat('de-DE', opts).formatToParts(d);
+    const get = (type: string) => parts.find(p => p.type === type)?.value ?? '';
+    return `${get('day')}.${get('month')}.${get('year')}`;
 }
 
 export function formatDate(

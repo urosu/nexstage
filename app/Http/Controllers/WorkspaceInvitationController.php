@@ -34,11 +34,9 @@ class WorkspaceInvitationController extends Controller
         }
 
         if (! $request->user()) {
-            // Redirect to login/register preserving the token
-            $userExists = \App\Models\User::where('email', $invitation->email)->exists();
-            $route      = $userExists ? 'login' : 'register';
-
-            return redirect("/{$route}?invitation={$token}");
+            // Always redirect to /login regardless of whether the email has an account,
+            // to prevent user enumeration attacks via the invitation landing page.
+            return redirect("/login?invitation={$token}");
         }
 
         // Authenticated — render confirmation
@@ -89,7 +87,7 @@ class WorkspaceInvitationController extends Controller
             ->value('role');
 
         // Admins may not invite as owner
-        $allowedRoles = $myRole === 'owner' ? ['admin', 'member'] : ['admin', 'member'];
+        $allowedRoles = $myRole === 'owner' ? ['owner', 'admin', 'member'] : ['admin', 'member'];
 
         $validated = $request->validate([
             'email' => ['required', 'string', 'email', 'max:255'],
@@ -106,11 +104,14 @@ class WorkspaceInvitationController extends Controller
     }
 
     /**
-     * Revoke a pending invitation (DELETE /settings/team/invitations/{token}).
+     * Revoke a pending invitation (DELETE /settings/team/invitations/{id}).
+     *
+     * Uses the opaque integer ID, not the secret token, so the token is never
+     * sent to the browser and cannot be harvested by workspace members.
      */
     public function destroy(
         Request $request,
-        string $token,
+        int $id,
         RevokeWorkspaceInvitationAction $action,
     ): RedirectResponse {
         $workspace = Workspace::findOrFail(app(WorkspaceContext::class)->id());
@@ -118,7 +119,7 @@ class WorkspaceInvitationController extends Controller
         $this->authorize('revoke', [WorkspaceInvitation::class, $workspace]);
 
         $invitation = WorkspaceInvitation::where('workspace_id', $workspace->id)
-            ->where('token', $token)
+            ->where('id', $id)
             ->firstOrFail();
 
         $action->handle($invitation);

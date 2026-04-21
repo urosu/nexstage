@@ -1,6 +1,6 @@
 # Nexstage — Product Plan
 
-**Status (April 2026):** Pre-launch, no live users. Phases 0 through 1.4 complete. Current: **Phase 1.5 — Foundation & Data Layer**. Next: **Phase 1.6 — Pages & UX**.
+**Status (April 2026):** Pre-launch, no live users. Phases 0 through 1.6 complete. Next: **Phase 2 — Shopify**.
 
 This is the source of truth for product decisions. PROGRESS.md tracks build state. CLAUDE.md holds coding conventions. RESEARCH.md holds verified facts.
 
@@ -123,7 +123,7 @@ Orders are **hard-deleted** when they disappear from the store. Nightly `Reconci
 
 **`store_webhooks`** — existing plus **`last_successful_delivery_at TIMESTAMP NULL`** (section 21).
 
-**`daily_snapshot_products`** — existing plus **`unit_cost DECIMAL(12,4) NULL`** (Shopify fallback, dormant on WC).
+**`daily_snapshot_products`** — existing plus **`unit_cost DECIMAL(12,4) NULL`** (Shopify COGS fallback, dormant on WC), **`stock_status VARCHAR(32) NULL`** (`instock` / `outofstock` / `onbackorder`), **`stock_quantity INTEGER NULL`** (historical daily stock state — current state already lives on `products`, but snapshots enable transition detection and stock-aware analytics; see section 5.8).
 
 ### New tables created in Phase 1.5
 
@@ -163,7 +163,7 @@ Orders are **hard-deleted** when they disappear from the store. Nightly `Reconci
 2. `workspaces` ALTER — add `workspace_settings JSONB`
 3. `orders` ALTER — add 5 attribution columns + index
 4. `order_items` ALTER — add `unit_cost`, `discount_amount`
-5. `daily_snapshot_products` ALTER — add `unit_cost`
+5. `daily_snapshot_products` ALTER — add `unit_cost`, `stock_status`, `stock_quantity`
 6. `campaigns` ALTER — add `previous_names`, `parsed_convention`
 7. `workspace_events` ALTER — add `scope_type`, `scope_id` with CHECK constraint
 8. `daily_notes` ALTER — same scope additions
@@ -174,12 +174,13 @@ Orders are **hard-deleted** when they disappear from the store. Nightly `Reconci
 
 ### Verification (before proceeding to Step 2)
 
-- [ ] `SELECT platform, primary_country_code FROM stores LIMIT 1` — platform `'woocommerce'`, country NULL
-- [ ] `\d orders` shows all attribution columns + index
-- [ ] `\d order_items`, `\d campaigns`, `\d workspace_events`, `\d daily_notes`, `\d store_webhooks` show additions
-- [ ] `SELECT COUNT(*) FROM channel_mappings WHERE is_global = true` returns ~40
-- [ ] `\d product_costs`, `\d product_affinities` show full shape
-- [ ] `php artisan migrate:rollback` reverses cleanly
+- [x] `SELECT platform, primary_country_code FROM stores LIMIT 1` — platform `'woocommerce'`, country NULL
+- [x] `\d orders` shows all attribution columns + index
+- [x] `\d order_items`, `\d campaigns`, `\d workspace_events`, `\d daily_notes`, `\d store_webhooks` show additions
+- [x] `SELECT COUNT(*) FROM channel_mappings WHERE is_global = true` returns ~40
+- [x] `\d daily_snapshot_products` shows `unit_cost`, `stock_status`, `stock_quantity`
+- [x] `\d product_costs`, `\d product_affinities` show full shape
+- [x] `php artisan migrate:rollback` reverses cleanly
 
 Only after this passes does Phase 1.5 proceed to Step 2.
 
@@ -246,6 +247,30 @@ Implemented as a query scope or helper function so pages don't reimplement it.
 - Multi-store workspaces can have a German store, a French store, an international store — each needs its own fallback
 - It's a query dimension (join on it), not UI config
 - Stores serve markets, workspaces don't
+
+---
+
+## 5.8 Stock tracking
+
+`products.stock_status` and `products.stock_quantity` already exist from Phase 0 and hold the **current** stock state, synced from WooCommerce via `product.updated` webhook and periodic product sync. This is enough to answer "is X in stock right now" but not "when did X go out of stock" or "how long has it been out."
+
+The Phase 1.5 schema pass adds `stock_status` and `stock_quantity` to `daily_snapshot_products` to capture **historical** daily state. `ComputeDailySnapshotJob` populates them from the current `products` row at snapshot time. No new job, no new webhook handler, daily resolution (which is enough — if a product flickers OOS at 10am and back at 2pm, we don't need to know, that's noise).
+
+### Why `daily_snapshot_products` and not a new table
+
+Stock and COGS are conceptually different (operational state vs economic state) but they share the same grain: one row per top product per store per day. Adding stock columns to the existing snapshot table keeps the daily product-state join simple and avoids a second table with the same shape. The conceptual separation lives in the code — different services read stock vs cost — not in the schema.
+
+### What this enables
+
+- **Out-of-stock transition detection** (Phase 1.6) — today's snapshot shows `outofstock`, yesterday's showed `instock` → fire a simple state-diff alert. No anomaly engine needed.
+- **Days-of-cover calculation** — `stock_quantity / avg_daily_units_sold` for a low-stock warning badge on `/analytics/products` ("runs out in 3 days").
+- **Winners/Losers OOS exclusion** — filter out currently-OOS products from the `/analytics/products` Winners/Losers ranking so sold-out top products don't look like they're dying from low sales.
+- **Stock-aware campaign alerts** (Phase 3 recommendation, PLANNING section 18) — "You're spending €200/day on Facebook ads for a product that's been out of stock for 2 days." Needs history to answer "how long OOS."
+- **Stock outage as anomaly correlation signal** — already in the Phase 3 single-cause chain (PLANNING section 17): "revenue dropped because your top product went OOS yesterday."
+
+### Shopify parity
+
+Shopify exposes `InventoryItem.available` and variant inventory via GraphQL. Phase 2 `ShopifyConnector` populates the same `stock_status` and `stock_quantity` columns on `products` (mapped from Shopify's inventory model) and on `daily_snapshot_products` via the same daily snapshot job. No service-layer changes — the schema is the abstraction.
 
 ---
 
@@ -566,7 +591,9 @@ Every analytics page answers ONE question. If a page can't answer a single clear
 
 **Hero (4 cards):** Total products sold, Total revenue, Total contribution margin (Real, when COGS configured), Avg margin % (Real, when COGS configured).
 
-**Table columns:** Product image + name, Orders, Units, Revenue, COGS, Contribution margin, Margin %, Attributed ad spend (UTM match via naming convention), Real profit/unit, Stock status, 14-day trend dots.
+**Table columns:** Product image + name, Orders, Units, Revenue, COGS, Contribution margin, Margin %, Attributed ad spend (UTM match via naming convention), Real profit/unit, Stock status, Days of cover (when stock tracked), 14-day trend dots.
+
+**Stock-aware behavior:** Stock status column renders with a coloured dot (green in-stock, amber low-stock, red out-of-stock). Days of cover computed as `stock_quantity / avg_daily_units_sold_last_14_days`, displayed as "3 days left" when ≤7, blank otherwise. Winners/Losers classifier excludes currently-OOS products from ranking — a sold-out top performer shouldn't appear in "Losers" just because its sales collapsed when it went out of stock.
 
 **Default sort:** Contribution margin desc when COGS configured, revenue desc otherwise.
 
@@ -1109,6 +1136,7 @@ Hourly:
 
 Daily:
   DispatchDailySnapshots → ComputeDailySnapshotJob          — low
+    → DetectStockTransitionsJob (per store) [Phase 1.6]     — low
     → ComputeMetricBaselinesJob (Phase 3)
       → DetectAnomaliesJob (Phase 3)
       → GenerateRecommendationsJob (Phase 3)
@@ -1227,7 +1255,7 @@ MetricCard primitive, BreakdownView, dashboard refactor + attribution, UTM cover
 
 **Step 6: StoreConnector capability flags** — extend interface with `supportsHistoricalCogs()`, `supportedAttributionFeatures()`, `supportsMultiTouch()`. Implement on `WooCommerceConnector`.
 
-**Step 7: Sync job refactor (feature-flagged)** — `UpsertWooCommerceOrderAction` calls parser and writes to new `attribution_*` columns. Existing `utm_*` columns continue to be written unchanged. COGS reader called on each line item. Feature flag `ATTRIBUTION_PARSER_ENABLED`.
+**Step 7: Sync job refactor (feature-flagged)** — `UpsertWooCommerceOrderAction` calls parser and writes to new `attribution_*` columns. Existing `utm_*` columns continue to be written unchanged. COGS reader called on each line item. Feature flag `ATTRIBUTION_PARSER_ENABLED`. `ComputeDailySnapshotJob` extended to populate `daily_snapshot_products.stock_status` and `stock_quantity` from the current `products` row at snapshot time.
 
 **Step 8: `BackfillAttributionDataJob`** — per workspace on `low` queue. Re-processes every existing order through parser pipeline. Full historical backfill. Dispatched manually from admin UI during beta. Progress via `/admin/system-health`.
 
@@ -1263,23 +1291,23 @@ MetricCard primitive, BreakdownView, dashboard refactor + attribution, UTM cover
 
 ### Phase 1.5 verification checklist
 
-- [ ] Schema finalisation verified per section 5.5
-- [ ] `AttributionParserService` returns correct results for PYS store, WC-native-only store, referrer fallback case (three feature tests)
-- [ ] `ChannelClassifierService` correctly applies workspace overrides over global rows
-- [ ] COGS reader populates `unit_cost` from each of three WC plugin sources
-- [ ] `BackfillAttributionDataJob` completes for beta store, all orders have non-null `attribution_*` columns
-- [ ] `<StoreCountryPrompt />` fires at store creation, persists `primary_country_code`
-- [ ] `/admin/attribution-debug/{order_id}` renders full parser pipeline
-- [ ] Winners/Losers endpoint serves all three classifiers on `/campaigns`
-- [ ] BreakdownView adopted on `/countries` and `/analytics/daily`
-- [ ] Queue restructure: FB rate limit does not block Google Ads or Store sync
-- [ ] `PollStoreOrdersJob` activates only when webhooks quiet >90 min
-- [ ] `ReconcileStoreOrdersJob` hard-deletes order that no longer exists in store
-- [ ] Deleting a store removes platform webhooks before deletion
-- [ ] Test-restore from backup completes
-- [ ] GDPR export produces valid bundle
-- [ ] `/admin/system-health` renders per-queue metrics with real data
-- [ ] Feature tests: attribution parser, trial freeze + reactivation, UTM parsing, billing tier, webhook reconciliation
+- [x] Schema finalisation verified per section 5.5
+- [x] `AttributionParserService` returns correct results for PYS store, WC-native-only store, referrer fallback case (three feature tests)
+- [x] `ChannelClassifierService` correctly applies workspace overrides over global rows
+- [x] COGS reader populates `unit_cost` from each of three WC plugin sources
+- [x] `BackfillAttributionDataJob` completes for beta store, all orders have non-null `attribution_*` columns
+- [x] `<StoreCountryPrompt />` fires at store creation, persists `primary_country_code`
+- [x] `/admin/attribution-debug/{order_id}` renders full parser pipeline
+- [x] Winners/Losers endpoint serves all three classifiers on `/campaigns`
+- [x] BreakdownView adopted on `/countries` and `/analytics/daily`
+- [x] Queue restructure: FB rate limit does not block Google Ads or Store sync
+- [x] `PollStoreOrdersJob` activates only when webhooks quiet >90 min
+- [x] `ReconcileStoreOrdersJob` hard-deletes order that no longer exists in store
+- [x] Deleting a store removes platform webhooks before deletion
+- [x] Test-restore from backup completes
+- [x] GDPR export produces valid bundle
+- [x] `/admin/system-health` renders per-queue metrics with real data
+- [x] Feature tests: attribution parser, trial freeze + reactivation, UTM parsing, billing tier, webhook reconciliation
 
 ### Phase 1.6 — Pages & UX
 
@@ -1300,23 +1328,25 @@ MetricCard primitive, BreakdownView, dashboard refactor + attribution, UTM cover
 - **Inline classify UI** on Acquisition — expandable sheet for "Other tagged" rows
 - **Order detail page with attribution journey** — click into any order, see first-touch, last-touch, click IDs, source badge. Uses parser data.
 - **Frequently-Bought-Together** — `ComputeProductAffinitiesJob` weekly, display on product detail
+- **Out-of-stock transition detection** — `DetectStockTransitionsJob` daily after `ComputeDailySnapshotJob`. State-diff on `daily_snapshot_products`: any product that was `instock` yesterday and is `outofstock` today creates an alert. Reverse transition (back in stock) also creates a lower-severity alert. Simple query, no anomaly engine needed. Alert links to product detail page.
 - **Monthly PDF reports** — `GenerateMonthlyReportJob` + Blade template via dompdf. On-demand from Insights + scheduled 1st of month. Includes contribution margin when COGS configured.
 - **Dashboard design principles** — `<WhyThisNumber />` on every MetricCard, `<DataFreshness />` in every PageHeader, action language, product images on product rows
 
 ### Phase 1.6 verification checklist
 
-- [ ] Every page in section 12.5 matches spec
-- [ ] `/acquisition` renders with real parser data
-- [ ] `/countries` side-by-side shows ad spend via naming convention + primary_country_code fallback
-- [ ] `/analytics/products` shows contribution margin when COGS configured, graceful empty state otherwise
-- [ ] Naming convention parser handles all three shapes, product-or-category matching works
-- [ ] Tag Generator produces matching URL + campaign names from one form
-- [ ] Inline Acquisition classify writes `channel_mappings` and re-classifies historical orders
-- [ ] Order detail shows full attribution journey
-- [ ] FBT populates `product_affinities` for test store with sufficient history
-- [ ] Monthly PDF generates without errors
-- [ ] `<WhyThisNumber />` fires on every MetricCard
-- [ ] `<DataFreshness />` renders on every page header
+- [x] Every page in section 12.5 matches spec
+- [x] `/acquisition` renders with real parser data
+- [x] `/countries` side-by-side shows ad spend via naming convention + primary_country_code fallback
+- [x] `/analytics/products` shows contribution margin when COGS configured, graceful empty state otherwise
+- [x] Naming convention parser handles all three shapes, product-or-category matching works
+- [x] Tag Generator produces matching URL + campaign names from one form
+- [x] Inline Acquisition classify writes `channel_mappings` and re-classifies historical orders
+- [x] Order detail shows full attribution journey
+- [x] FBT populates `product_affinities` for test store with sufficient history
+- [x] `DetectStockTransitionsJob` fires an alert when a test product transitions from in-stock to out-of-stock between two daily snapshots
+- [x] Monthly PDF generates without errors
+- [x] `<WhyThisNumber />` fires on every MetricCard
+- [x] `<DataFreshness />` renders on every page header
 
 ### Phase 2 — Shopify
 

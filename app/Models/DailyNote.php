@@ -4,16 +4,22 @@ declare(strict_types=1);
 
 namespace App\Models;
 
+use App\Models\Concerns\HasAnnotationScope;
 use App\Scopes\WorkspaceScope;
+use Illuminate\Database\Eloquent\Attributes\ScopedBy;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
+#[ScopedBy([WorkspaceScope::class])]
 class DailyNote extends Model
 {
+    use HasAnnotationScope;
     protected $fillable = [
         'workspace_id',
         'date',
         'note',
+        'scope_type',
+        'scope_id',
         'created_by',
         'updated_by',
     ];
@@ -21,11 +27,6 @@ class DailyNote extends Model
     protected $casts = [
         'date' => 'date',
     ];
-
-    protected static function booted(): void
-    {
-        static::addGlobalScope(new WorkspaceScope());
-    }
 
     public function workspace(): BelongsTo
     {

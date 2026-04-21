@@ -57,6 +57,19 @@ return new class extends Migration
             // (organic, direct) that UTM parameters alone can't identify.
             $table->string('source_type', 50)->nullable();
 
+            // Normalised attribution columns — written by AttributionParserService.
+            // RevenueAttributionService continues reading utm_* columns until Phase 1.5
+            // Step 14 cutover — these are parallel, not replacements.
+            // Values for attribution_source: pys / wc_native / shopify_journey / shopify_landing / referrer / none
+            // first_touch/last_touch shape: {source, medium, campaign, content, term, landing_page, timestamp}
+            // click_ids shape: {fbc, fbp, gclid, msclkid} — Phase 4 CAPI enabler.
+            // @see PLANNING.md section 5, 6
+            $table->string('attribution_source', 32)->nullable();
+            $table->jsonb('attribution_first_touch')->nullable();
+            $table->jsonb('attribution_last_touch')->nullable();
+            $table->jsonb('attribution_click_ids')->nullable();
+            $table->timestamp('attribution_parsed_at')->nullable();
+
             // fee_lines, order_notes, and other rarely-accessed fields.
             // See: PLANNING.md "Data Capture Strategy — What to JSONB"
             $table->jsonb('raw_meta')->nullable();
@@ -77,6 +90,9 @@ return new class extends Migration
         });
 
         DB::statement("ALTER TABLE orders ADD CONSTRAINT orders_status_check CHECK (status IN ('completed','processing','refunded','cancelled','other'))");
+
+        // Supports channel-based filtering in attribution-aware queries.
+        DB::statement("CREATE INDEX idx_orders_attribution_source ON orders (workspace_id, attribution_source)");
     }
 
     public function down(): void

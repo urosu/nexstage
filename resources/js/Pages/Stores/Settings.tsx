@@ -6,6 +6,7 @@ import { StoreLayout } from '@/Components/layouts/StoreLayout';
 import type { StoreData } from '@/Components/layouts/StoreLayout';
 import type { PageProps } from '@/types';
 import { TimezoneSelect } from '@/Components/shared/TimezoneSelect';
+import { StoreCountryPrompt } from '@/Components/shared/StoreCountryPrompt';
 
 interface Props extends PageProps {
     store: StoreData;
@@ -27,8 +28,7 @@ export default function StoreSettings({ store }: Props) {
     useEffect(() => {
         reset();
         setData({ name: store.name, slug: store.slug, timezone: store.timezone });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [store.slug]);
+    }, [store.name, store.slug, store.timezone]);
 
     function handleSubmit(e: React.FormEvent) {
         e.preventDefault();
@@ -145,6 +145,31 @@ export default function StoreSettings({ store }: Props) {
                                 </button>
                             </div>
                         </form>
+                    </div>
+
+                    {/* ── Primary country ───────────────────────────────────────────── */}
+                    <div className="rounded-xl border border-zinc-200 bg-white p-6">
+                        <h2 className="mb-1 text-sm font-semibold text-zinc-900">Primary country</h2>
+                        <p className="mb-4 text-sm text-zinc-500">
+                            Used as a fallback country for ad spend attribution when campaign names
+                            don't include a country code. Multi-country stores can leave this blank.
+                        </p>
+
+                        {/* Persistent notice when NULL — shown prominently so it's hard to miss */}
+                        {store.primary_country_code === null && (
+                            <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                                No primary country set. Ad spend without country tagging will show as
+                                "Country unknown" on analytics pages.
+                            </div>
+                        )}
+
+                        <StoreCountryPrompt
+                            value={store.primary_country_code}
+                            saveUrl={w(`/stores/${store.slug}/country`)}
+                            storeName={store.name}
+                            websiteUrl={store.website_url}
+                            compact
+                        />
                     </div>
 
                     {/* Danger zone */}

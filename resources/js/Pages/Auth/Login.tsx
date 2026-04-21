@@ -1,8 +1,9 @@
+import { type PageProps } from '@/types';
 import AuthLayout from '@/Components/layouts/AuthLayout';
 import { Button } from '@/Components/ui/button';
 import { Input } from '@/Components/ui/input';
 import { Label } from '@/Components/ui/label';
-import { Head, Link, useForm } from '@inertiajs/react';
+import { Head, Link, useForm, usePage } from '@inertiajs/react';
 import { FormEventHandler } from 'react';
 
 export default function Login({
@@ -14,6 +15,7 @@ export default function Login({
     canResetPassword: boolean;
     invitation_token?: string;
 }) {
+    const { isLocal } = usePage<PageProps<{ isLocal: boolean }>>().props;
     const { data, setData, post, processing, errors, reset } = useForm({
         email: '',
         password: '',
@@ -107,7 +109,7 @@ export default function Login({
                 </div>
             </form>
 
-            <div className="mt-6 rounded-lg border border-zinc-200 bg-zinc-50 p-4">
+            {isLocal && <div className="mt-6 rounded-lg border border-zinc-200 bg-zinc-50 p-4">
                 <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
                     Dev accounts
                 </p>
@@ -150,7 +152,7 @@ export default function Login({
                         ))}
                     </div>
                 </div>
-            </div>
+            </div>}
         </AuthLayout>
     );
 }

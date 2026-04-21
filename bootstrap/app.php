@@ -14,10 +14,18 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
+        // SetActiveWorkspace must run BEFORE SubstituteBindings so that WorkspaceContext
+        // is populated when implicit route model binding resolves workspace-scoped models
+        // (e.g. Order, which carries WorkspaceScope). Without this ordering, SubstituteBindings
+        // calls Order::find() before WorkspaceContext is set, throwing a RuntimeException.
+        //
+        // Strategy: remove SubstituteBindings from its default position (end of web group)
+        // and re-append it after SetActiveWorkspace. Session is already started by this
+        // point so SetActiveWorkspace's session-based fallback still works.
+        $middleware->web(remove: [\Illuminate\Routing\Middleware\SubstituteBindings::class]);
         $middleware->web(append: [
-            // SetActiveWorkspace must run before HandleInertiaRequests so that
-            // WorkspaceContext is populated when share() reads it.
             \App\Http\Middleware\SetActiveWorkspace::class,
+            \Illuminate\Routing\Middleware\SubstituteBindings::class,
             \App\Http\Middleware\EnforceBillingAccess::class,
             \App\Http\Middleware\HandleInertiaRequests::class,
             \Illuminate\Http\Middleware\AddLinkHeadersForPreloadedAssets::class,

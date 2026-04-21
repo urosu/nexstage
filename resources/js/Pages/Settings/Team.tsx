@@ -23,7 +23,6 @@ interface Invitation {
     email: string;
     role: string;
     expires_at: string;
-    token: string;
 }
 
 interface WorkspaceInfo {
@@ -74,8 +73,8 @@ export default function Team({
         });
     };
 
-    const revokeInvitation = (token: string) => {
-        router.delete(w(`/settings/team/invitations/${token}`));
+    const revokeInvitation = (id: number) => {
+        router.delete(w(`/settings/team/invitations/${id}`));
     };
 
     const removeMember = (workspaceUserId: number) => {
@@ -171,7 +170,7 @@ export default function Team({
                                     </div>
                                     <button
                                         type="button"
-                                        onClick={() => revokeInvitation(inv.token)}
+                                        onClick={() => revokeInvitation(inv.id)}
                                         className="text-xs text-red-600 hover:text-red-800 transition-colors"
                                     >
                                         Revoke

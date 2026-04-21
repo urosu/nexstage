@@ -1,11 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 import { Head, Link, router, usePage } from '@inertiajs/react';
-import { Building2, RefreshCw, ShieldAlert } from 'lucide-react';
+
+// Why: When Inertia swaps components via flushSync mid-navigation, the new component
+// initialises with useState(false) and renders stale cached data before the real server
+// response arrives. Tracking navigation state at module level lets us start with
+// navigating=true so the skeleton stays visible until the real data is ready.
+let _inertiaNavigating = false;
+router.on('start',  () => { _inertiaNavigating = true; });
+router.on('finish', () => { _inertiaNavigating = false; });
+
+import { Building2, Cpu, RefreshCw, ShieldAlert } from 'lucide-react';
 import AppLayout from '@/Components/layouts/AppLayout';
 import { PageHeader } from '@/Components/shared/PageHeader';
 import { cn } from '@/lib/utils';
 import { formatDateOnly } from '@/lib/formatters';
-import type { AdminWorkspace, PageProps } from '@/types';
+import type { AdminWorkspace, AttributionBackfillProgress, PageProps } from '@/types';
 
 const PLAN_LABELS: Record<string, string> = {
     starter:    'Starter',
@@ -39,7 +48,7 @@ const PLAN_OPTIONS = ['starter', 'growth', 'scale', 'percentage', 'enterprise'] 
 
 export default function AdminWorkspaces({ workspaces, filters }: Props) {
     const [search, setSearch] = useState(filters.search);
-    const [navigating, setNavigating] = useState(false);
+    const [navigating, setNavigating] = useState(() => _inertiaNavigating);
     const [planEditing, setPlanEditing] = useState<number | null>(null);
     const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -68,8 +77,19 @@ export default function AdminWorkspaces({ workspaces, filters }: Props) {
         });
     }
 
+    function backfillAttribution(workspaceId: number): void {
+        router.post(`/admin/workspaces/${workspaceId}/backfill-attribution`, {}, { preserveScroll: true });
+    }
+
     function impersonate(ownerId: number): void {
         router.post(`/admin/users/${ownerId}/impersonate`);
+    }
+
+    function backfillLabel(bf: AttributionBackfillProgress | null): string {
+        if (!bf) return '';
+        if (bf.status === 'running') return `${bf.processed}/${bf.total}`;
+        if (bf.status === 'completed') return `${bf.processed} done`;
+        return 'failed';
     }
 
     return (
@@ -200,6 +220,31 @@ export default function AdminWorkspaces({ workspaces, filters }: Props) {
                                                 >
                                                     <RefreshCw className="h-3.5 w-3.5" />
                                                     Sync
+                                                </button>
+                                            )}
+                                            {!w.deleted_at && (
+                                                <button
+                                                    onClick={() => backfillAttribution(w.id)}
+                                                    className={cn(
+                                                        'flex items-center gap-1 rounded px-2 py-1 text-xs transition-colors',
+                                                        w.attribution_backfill?.status === 'running'
+                                                            ? 'text-amber-600 hover:bg-amber-50'
+                                                            : w.attribution_backfill?.status === 'failed'
+                                                                ? 'text-red-500 hover:bg-red-50'
+                                                                : w.attribution_backfill?.status === 'completed'
+                                                                    ? 'text-green-600 hover:bg-green-50'
+                                                                    : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700',
+                                                    )}
+                                                    title={
+                                                        w.attribution_backfill?.status === 'failed'
+                                                            ? `Failed: ${w.attribution_backfill.error ?? 'unknown error'}`
+                                                            : 'Re-run attribution backfill for all orders'
+                                                    }
+                                                >
+                                                    <Cpu className="h-3.5 w-3.5" />
+                                                    {w.attribution_backfill
+                                                        ? backfillLabel(w.attribution_backfill)
+                                                        : 'Backfill'}
                                                 </button>
                                             )}
                                             {w.owner && !w.deleted_at && (

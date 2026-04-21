@@ -27,10 +27,13 @@ import { router } from '@inertiajs/react';
 import axios from 'axios';
 import {
     BarChart as RechartsBarChart,
+    LineChart as RechartsLineChart,
     Bar,
+    Line,
     XAxis,
     YAxis,
     Tooltip,
+    CartesianGrid,
     ResponsiveContainer,
     Cell,
 } from 'recharts';
@@ -71,6 +74,8 @@ export interface BreakdownRow {
     label: string;
     /** Arbitrary metric columns — keyed by metric name, value may be null when no data. */
     metrics: Record<string, number | null>;
+    /** Winner/loser classification for the W/L highlight feature. */
+    wl_tag?: 'winner' | 'loser' | null;
     /** Optional sub-rows for hierarchical breakdowns (Phase 3+). */
     children?: BreakdownRow[];
 }
@@ -83,8 +88,11 @@ export interface BreakdownColumn {
     key: string;
     /** Human-readable column header. */
     label: string;
-    /** How to format the value for display. */
-    format: 'currency' | 'number' | 'percent' | 'multiplier' | 'raw';
+    /**
+     * How to format the value for display.
+     * - 'percent_plain' renders X.X% without a +/- sign (for share/rate columns, not deltas).
+     */
+    format: 'currency' | 'number' | 'percent' | 'percent_plain' | 'multiplier' | 'raw';
     /** Currency code — only needed when format='currency'. Defaults to the view's `currency` prop. */
     currency?: string;
     /** Lower is better (e.g. CPO, CPC). Used for trend coloring in table cells. */
@@ -141,6 +149,47 @@ export interface BreakdownViewProps {
     onViewChange?: (mode: BreakdownViewMode) => void;
     /** Empty state message when data is empty after filtering. */
     emptyMessage?: string;
+    /**
+     * Called when a row is clicked in table or cards view.
+     * Use for drill-downs or row selection (e.g., select a country to load top products).
+     */
+    onRowClick?: (row: BreakdownRow) => void;
+    /**
+     * Highlights the row whose id matches this value.
+     * Typically set to the currently-selected drill-down item.
+     */
+    selectedId?: string | number;
+    /**
+     * Renders extra `<td>` cells at the end of each table row, after all metric columns.
+     * Only rendered in table view. Use for bespoke interactive cells (e.g. inline note editor).
+     */
+    renderRowSuffix?: (row: BreakdownRow) => React.ReactNode;
+    /**
+     * Column header label for the suffix cell(s) added by renderRowSuffix.
+     * Adds a matching `<th>` in the table header row.
+     */
+    suffixColumnLabel?: string;
+    /**
+     * Default sort key (must match a key in BreakdownColumn or a key present in row.metrics).
+     * Overrides the default of columns[0].key. Useful for hidden sort keys like `date_ts`.
+     */
+    defaultSortBy?: string;
+    /**
+     * Default sort direction. Defaults to 'desc'.
+     */
+    defaultSortDir?: 'asc' | 'desc';
+    /**
+     * Returns extra Tailwind classes for a given row — use for per-row colour coding
+     * (e.g. winner/loser highlighting). Applied before the selectedId override so
+     * selection always wins.
+     */
+    getRowClassName?: (row: BreakdownRow) => string | undefined;
+    /**
+     * Content rendered on the left side of the BreakdownView toolbar.
+     * Use for page-level filter chips (e.g. All / Winners / Losers) when
+     * the isWinner predicate is not provided (server-side filtering).
+     */
+    leftSlot?: React.ReactNode;
 }
 
 // ---------------------------------------------------------------------------
@@ -161,6 +210,8 @@ function formatValue(
             return formatNumber(value, true);
         case 'percent':
             return `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
+        case 'percent_plain':
+            return `${value.toFixed(1)}%`;
         case 'multiplier':
             return `${value.toFixed(2)}×`;
         case 'raw':
@@ -189,11 +240,17 @@ function RowCard({
     columns,
     cardData,
     currency,
+    isSelected,
+    onClick,
+    className,
 }: {
     row: BreakdownRow;
     columns: BreakdownColumn[];
     cardData: BreakdownCardData;
     currency?: string;
+    isSelected?: boolean;
+    onClick?: (row: BreakdownRow) => void;
+    className?: string;
 }) {
     // Show first 4 columns marked showInCards (or all if showInCards is not set)
     const cardCols = columns
@@ -201,7 +258,16 @@ function RowCard({
         .slice(0, 4);
 
     return (
-        <div className="rounded-xl border border-zinc-200 bg-white p-4 space-y-2 hover:shadow-sm transition-shadow">
+        <div
+            className={cn(
+                'rounded-xl border p-4 space-y-2 transition-shadow',
+                onClick && 'cursor-pointer',
+                isSelected
+                    ? 'border-primary/40 bg-primary/5 shadow-sm'
+                    : cn('border-zinc-200 bg-white hover:shadow-sm', className),
+            )}
+            onClick={() => onClick?.(row)}
+        >
             <div className="flex items-start justify-between gap-2 min-w-0">
                 <p className="text-sm font-medium text-zinc-900 truncate leading-snug">{row.label}</p>
                 {cardData !== 'all' && <SourceBadge source={cardData as MetricSource} />}
@@ -224,6 +290,174 @@ function RowCard({
                         </div>
                     );
                 })}
+            </div>
+        </div>
+    );
+}
+
+
+// ---------------------------------------------------------------------------
+// Date line chart — multi-series line chart used when breakdownBy='date'
+// ---------------------------------------------------------------------------
+
+function DateLineChart({
+    rows,
+    columns,
+    currency,
+    highlightWL,
+}: {
+    rows: BreakdownRow[];
+    columns: BreakdownColumn[];
+    currency?: string;
+    highlightWL?: boolean;
+}) {
+    const numericCols = columns.filter(c => !c.isChangePct);
+
+    // Default: first two columns active (typically ad_spend + revenue)
+    const [visible, setVisible] = useState<Set<string>>(
+        () => new Set(numericCols.slice(0, 2).map(c => c.key)),
+    );
+
+    function toggle(key: string) {
+        setVisible(prev => {
+            const next = new Set(prev);
+            if (next.has(key)) {
+                if (next.size === 1) return prev; // keep at least one line
+                next.delete(key);
+            } else {
+                next.add(key);
+            }
+            return next;
+        });
+    }
+
+    // Sort chronologically — rows may arrive sorted desc by date_ts
+    const chartData = useMemo(() => {
+        const sorted = [...rows].sort((a, b) => {
+            const aTs = (a.metrics.date_ts as number) ?? 0;
+            const bTs = (b.metrics.date_ts as number) ?? 0;
+            return aTs - bTs;
+        });
+        return sorted.map(row => ({
+            label: row.label,
+            wl_tag: row.wl_tag ?? null,
+            ...Object.fromEntries(numericCols.map(c => [c.key, row.metrics[c.key]])),
+        }));
+    }, [rows, numericCols]);
+
+    const visibleCols     = numericCols.filter(c => visible.has(c.key));
+    const hasCurrency     = visibleCols.some(c => c.format === 'currency');
+    const hasNonCurrency  = visibleCols.some(c => c.format !== 'currency');
+    const dualAxis        = hasCurrency && hasNonCurrency;
+    // Log scale when multiple currency series are visible — e.g. Revenue (€10k) + AOV (€50)
+    // would flatten AOV to near-zero on a linear axis.
+    const multipleLeft    = visibleCols.filter(c => c.format === 'currency').length > 1;
+
+    // Representative column for each axis — drives tick formatting
+    const leftCol  = dualAxis ? visibleCols.find(c => c.format === 'currency')! : visibleCols[0];
+    const rightCol = dualAxis ? visibleCols.find(c => c.format !== 'currency')  : undefined;
+
+    function getAxisId(col: BreakdownColumn): 'left' | 'right' {
+        return dualAxis && col.format !== 'currency' ? 'right' : 'left';
+    }
+
+    return (
+        <div className="space-y-3">
+            {/* Series toggle pills */}
+            <div className="flex flex-wrap gap-1.5">
+                {numericCols.map((col, i) => {
+                    const on    = visible.has(col.key);
+                    const color = `var(--chart-${i + 1})`;
+                    return (
+                        <button
+                            key={col.key}
+                            onClick={() => toggle(col.key)}
+                            className={cn(
+                                'flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors',
+                                !on && 'border-zinc-200 bg-white text-zinc-400 hover:text-zinc-600',
+                            )}
+                            style={on ? { backgroundColor: color, borderColor: color, color: 'white' } : undefined}
+                        >
+                            <span
+                                className="h-1.5 w-1.5 rounded-full"
+                                style={{ backgroundColor: on ? 'white' : color }}
+                            />
+                            {col.label}
+                        </button>
+                    );
+                })}
+            </div>
+
+            <div className="h-64">
+                <ResponsiveContainer width="100%" height="100%">
+                    <RechartsLineChart
+                        data={chartData}
+                        margin={{ top: 4, right: dualAxis ? 56 : 8, left: 4, bottom: 0 }}
+                    >
+                        <CartesianGrid strokeDasharray="3 3" stroke="#f4f4f5" vertical={false} />
+                        <XAxis
+                            dataKey="label"
+                            tickLine={false}
+                            axisLine={false}
+                            tick={{ fontSize: 11, fill: '#a1a1aa' }}
+                            minTickGap={48}
+                        />
+                        <YAxis
+                            yAxisId="left"
+                            orientation="left"
+                            scale={multipleLeft ? 'log' : 'linear'}
+                            domain={multipleLeft ? [1, 'auto'] : [0, 'auto']}
+                            allowDataOverflow={multipleLeft}
+                            tickLine={false}
+                            axisLine={false}
+                            tick={{ fontSize: 11, fill: '#a1a1aa' }}
+                            tickFormatter={(v: number) => leftCol ? formatValue(v, leftCol, currency) : String(v)}
+                            width={60}
+                        />
+                        {dualAxis && rightCol && (
+                            <YAxis
+                                yAxisId="right"
+                                orientation="right"
+                                tickLine={false}
+                                axisLine={false}
+                                tick={{ fontSize: 11, fill: '#a1a1aa' }}
+                                tickFormatter={(v: number) => formatValue(v, rightCol, currency)}
+                                width={44}
+                            />
+                        )}
+                        <Tooltip
+                            contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e4e4e7' }}
+                            formatter={(value: unknown, key: unknown) => {
+                                const col = numericCols.find(c => c.key === String(key));
+                                if (!col) return [String(value), String(key)];
+                                return [formatValue(value as number, col, currency), col.label] as [string, string];
+                            }}
+                        />
+                        {numericCols.map((col, i) =>
+                            visible.has(col.key) ? (
+                                <Line
+                                    key={col.key}
+                                    yAxisId={getAxisId(col)}
+                                    type="monotone"
+                                    dataKey={col.key}
+                                    stroke={`var(--chart-${i + 1})`}
+                                    strokeWidth={2}
+                                    connectNulls
+                                    dot={highlightWL
+                                        ? (props: { cx?: number; cy?: number; payload?: { wl_tag?: string | null } }) => {
+                                            const { cx = 0, cy = 0, payload } = props;
+                                            const tag = payload?.wl_tag;
+                                            if (tag === 'winner') return <circle key={`${col.key}-${cx}`} cx={cx} cy={cy} r={4} fill="#10b981" stroke="white" strokeWidth={1.5} />;
+                                            if (tag === 'loser')  return <circle key={`${col.key}-${cx}`} cx={cx} cy={cy} r={4} fill="#ef4444" stroke="white" strokeWidth={1.5} />;
+                                            return <g key={`${col.key}-${cx}`} />;
+                                        }
+                                        : false
+                                    }
+                                />
+                            ) : null,
+                        )}
+                    </RechartsLineChart>
+                </ResponsiveContainer>
             </div>
         </div>
     );
@@ -333,6 +567,14 @@ export function BreakdownView({
     loading = false,
     onViewChange,
     emptyMessage = 'No data for this period.',
+    onRowClick,
+    selectedId,
+    renderRowSuffix,
+    suffixColumnLabel,
+    defaultSortBy,
+    defaultSortDir,
+    getRowClassName,
+    leftSlot,
 }: BreakdownViewProps) {
     const { auth } = usePage<PageProps>().props;
     const savedPrefs = viewKey ? (auth.user?.view_preferences?.[viewKey] ?? {}) : {};
@@ -349,9 +591,11 @@ export function BreakdownView({
     const [filter, setFilter] = useState<'all' | 'winners' | 'losers'>(
         urlFilterParam ?? (savedPrefs.filter as 'all' | 'winners' | 'losers') ?? 'all',
     );
-    const [sortBy, setSortBy] = useState<string>(savedPrefs.sort_by ?? (columns[0]?.key ?? ''));
+    const [sortBy, setSortBy] = useState<string>(
+        savedPrefs.sort_by ?? defaultSortBy ?? (columns[0]?.key ?? ''),
+    );
     const [sortDir, setSortDir] = useState<'asc' | 'desc'>(
-        (savedPrefs.sort_dir as 'asc' | 'desc') ?? 'desc',
+        (savedPrefs.sort_dir as 'asc' | 'desc') ?? defaultSortDir ?? 'desc',
     );
 
     // --- Persist to view_preferences (debounced) ---
@@ -461,6 +705,8 @@ export function BreakdownView({
                             </span>
                         )}
                     </div>
+                ) : leftSlot ? (
+                    <div>{leftSlot}</div>
                 ) : (
                     <div />
                 )}
@@ -511,6 +757,9 @@ export function BreakdownView({
                             columns={cardColumns}
                             cardData={cardData}
                             currency={currency}
+                            isSelected={row.id === selectedId}
+                            onClick={onRowClick}
+                            className={getRowClassName?.(row)}
                         />
                     ))}
                 </div>
@@ -520,8 +769,8 @@ export function BreakdownView({
             {viewMode === 'table' && displayRows.length > 0 && (
                 <div className="overflow-x-auto rounded-xl border border-zinc-200 bg-white">
                     <table className="w-full text-sm">
-                        <thead>
-                            <tr className="border-b border-zinc-100 bg-zinc-50 text-left">
+                        <thead className="sticky top-0 z-10 bg-zinc-50">
+                            <tr className="border-b border-zinc-100 text-left">
                                 <th className="px-4 py-3 font-medium text-zinc-400 min-w-[160px]">
                                     {breakdownBy.charAt(0).toUpperCase() + breakdownBy.slice(1)}
                                 </th>
@@ -537,12 +786,30 @@ export function BreakdownView({
                                         </span>
                                     </th>
                                 ))}
+                                {suffixColumnLabel && (
+                                    <th className="px-4 py-3 font-medium text-zinc-400 text-left whitespace-nowrap min-w-[180px]">
+                                        {suffixColumnLabel}
+                                    </th>
+                                )}
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-zinc-50">
                             {displayRows.map(row => (
-                                <tr key={row.id} className="hover:bg-zinc-50 transition-colors">
-                                    <td className="px-4 py-3 font-medium text-zinc-900 max-w-[240px] truncate">
+                                <tr
+                                    key={row.id}
+                                    className={cn(
+                                        'transition-colors',
+                                        onRowClick && 'cursor-pointer',
+                                        getRowClassName?.(row),
+                                        row.id === selectedId
+                                            ? 'bg-primary/10 ring-1 ring-inset ring-primary/20'
+                                            : 'hover:bg-zinc-50',
+                                    )}
+                                    onClick={() => onRowClick?.(row)}
+                                >
+                                    <td className="px-4 py-3.5 font-medium max-w-[240px] truncate text-zinc-800"
+                                        style={{ color: row.id === selectedId ? 'var(--color-primary)' : undefined }}
+                                    >
                                         {row.label}
                                     </td>
                                     {columns.map(col => {
@@ -554,7 +821,7 @@ export function BreakdownView({
                                             <td
                                                 key={col.key}
                                                 className={cn(
-                                                    'px-4 py-3 text-right tabular-nums whitespace-nowrap',
+                                                    'px-4 py-3.5 text-right tabular-nums whitespace-nowrap',
                                                     isPositive
                                                         ? 'text-green-600'
                                                         : isNegative
@@ -566,6 +833,7 @@ export function BreakdownView({
                                             </td>
                                         );
                                     })}
+                                    {renderRowSuffix && renderRowSuffix(row)}
                                 </tr>
                             ))}
                         </tbody>
@@ -576,7 +844,10 @@ export function BreakdownView({
             {/* ── Graph view ──────────────────────────────────────────────── */}
             {viewMode === 'graph' && displayRows.length > 0 && (
                 <div className="rounded-xl border border-zinc-200 bg-white p-4">
-                    <GraphView rows={displayRows} columns={columns} currency={currency} />
+                    {breakdownBy === 'date'
+                        ? <DateLineChart rows={displayRows} columns={columns} currency={currency} highlightWL={!!getRowClassName} />
+                        : <GraphView rows={displayRows} columns={columns} currency={currency} />
+                    }
                 </div>
             )}
         </div>

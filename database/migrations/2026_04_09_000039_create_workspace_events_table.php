@@ -31,12 +31,22 @@ return new class extends Migration
             $table->boolean('needs_review')->default(false);
 
             $table->boolean('suppress_anomalies')->default(true);
+
+            // Scope columns — events can be narrowed to a specific store or integration.
+            // Scope-aware annotations render on charts only when the active scope matches.
+            // DEFAULT 'workspace' preserves current behavior for all existing rows.
+            // @see PLANNING.md section 5, 8
+            $table->string('scope_type', 16)->default('workspace');
+            $table->unsignedBigInteger('scope_id')->nullable();
+
             $table->timestamps();
 
             $table->index(['workspace_id', 'date_from', 'date_to']);
         });
 
         DB::statement("ALTER TABLE workspace_events ADD CONSTRAINT workspace_events_event_type_check CHECK (event_type IN ('promotion','expected_spike','expected_drop'))");
+        DB::statement("ALTER TABLE workspace_events ADD CONSTRAINT workspace_events_scope_type_check CHECK (scope_type IN ('workspace','store','integration'))");
+        DB::statement("CREATE INDEX workspace_events_scope_index ON workspace_events (workspace_id, scope_type, scope_id)");
     }
 
     public function down(): void

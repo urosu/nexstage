@@ -22,6 +22,20 @@ return new class extends Migration
             $table->text('error_message')->nullable();
             $table->timestamp('started_at')->nullable();
             $table->timestamp('completed_at')->nullable();
+
+            // When the job was dispatched — equals created_at for immediate jobs,
+            // or a future timestamp for delayed dispatches (e.g. rate-limit backoff).
+            $table->timestamp('scheduled_at')->nullable();
+
+            // Which Horizon queue: critical | high | default | low
+            $table->string('queue', 50)->nullable();
+
+            // Retry attempt number. 1 = first run, 2+ = retries.
+            $table->smallInteger('attempt')->default(1);
+
+            // Job constructor arguments for debugging (store_id, date_range, etc.).
+            $table->jsonb('payload')->nullable();
+
             $table->integer('duration_seconds')->nullable();
             $table->timestamps();
 
@@ -29,7 +43,7 @@ return new class extends Migration
             $table->index(['status', 'created_at']);
         });
 
-        DB::statement("ALTER TABLE sync_logs ADD CONSTRAINT sync_logs_status_check CHECK (status IN ('running','completed','failed'))");
+        DB::statement("ALTER TABLE sync_logs ADD CONSTRAINT sync_logs_status_check CHECK (status IN ('queued','running','completed','failed'))");
     }
 
     public function down(): void

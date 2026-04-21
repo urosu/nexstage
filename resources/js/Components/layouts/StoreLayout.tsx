@@ -13,6 +13,8 @@ export interface StoreData {
     timezone: string;
     status: string;
     type: string;
+    primary_country_code: string | null;
+    website_url: string | null;
 }
 
 type StoreTab = 'overview' | 'products' | 'countries' | 'seo' | 'performance' | 'settings';

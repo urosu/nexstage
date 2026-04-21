@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useLayoutEffect, useRef, useMemo, useState } from 'react';
 import {
     LineChart,
     Line,
@@ -6,7 +6,6 @@ import {
     YAxis,
     CartesianGrid,
     Tooltip,
-    ResponsiveContainer,
     ReferenceArea,
 } from 'recharts';
 import { formatDate, formatNumber, type Granularity } from '@/lib/formatters';
@@ -27,16 +26,16 @@ interface SeriesConfig {
     key: SeriesKey;
     label: string;
     color: string;
-    yAxis: 'left' | 'right';
+    yAxisId: 'left' | 'ctr' | 'position';
     valueType: 'number' | 'percent' | 'position';
 }
 
-// Left axis: count metrics. Right axis: rate/position metrics.
+// Each series has its own axis so scale/domain is independent per metric type.
 const SERIES: SeriesConfig[] = [
-    { key: 'clicks',      label: 'Clicks',      color: 'var(--chart-1)', yAxis: 'left',  valueType: 'number'   },
-    { key: 'impressions', label: 'Impressions',  color: 'var(--chart-5)', yAxis: 'left',  valueType: 'number'   },
-    { key: 'ctr',         label: 'CTR',          color: 'var(--chart-2)', yAxis: 'right', valueType: 'percent'  },
-    { key: 'position',    label: 'Avg Position', color: 'var(--chart-4)', yAxis: 'right', valueType: 'position' },
+    { key: 'clicks',      label: 'Clicks',      color: 'var(--chart-1)', yAxisId: 'left',     valueType: 'number'   },
+    { key: 'impressions', label: 'Impressions',  color: 'var(--chart-5)', yAxisId: 'left',     valueType: 'number'   },
+    { key: 'ctr',         label: 'CTR',          color: 'var(--chart-2)', yAxisId: 'ctr',      valueType: 'percent'  },
+    { key: 'position',    label: 'Avg Position', color: 'var(--chart-4)', yAxisId: 'position', valueType: 'position' },
 ];
 
 function formatValue(value: number, valueType: SeriesConfig['valueType']): string {
@@ -58,7 +57,25 @@ interface Props {
     className?: string;
 }
 
-export function GscMultiSeriesChart({ data, granularity, timezone, className }: Props) {
+const GscMultiSeriesChartInner = function GscMultiSeriesChart({ data, granularity, timezone, className }: Props) {
+    // Why: ResponsiveContainer starts with width=-1 and warns before ResizeObserver fires.
+    // We measure the container ourselves so the chart only renders with real dimensions.
+    const containerRef = useRef<HTMLDivElement>(null);
+    const [chartSize, setChartSize] = useState<{ w: number; h: number } | null>(null);
+
+    useLayoutEffect(() => {
+        const el = containerRef.current;
+        if (!el) return;
+        const { width, height } = el.getBoundingClientRect();
+        if (width > 0) setChartSize({ w: width, h: height });
+        const ro = new ResizeObserver(([entry]) => {
+            const { inlineSize: w, blockSize: h } = entry.contentBoxSize[0];
+            setChartSize({ w, h });
+        });
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, []);
+
     const [visible, setVisible] = useState<Set<SeriesKey>>(new Set(['clicks']));
 
     // Zoom state — drag to zoom like MultiSeriesLineChart
@@ -132,11 +149,15 @@ export function GscMultiSeriesChart({ data, granularity, timezone, className }: 
         return data.slice(zoomedIndices.start, zoomedIndices.end + 1);
     }, [data, zoomedIndices]);
 
-    const hasLeft  = SERIES.some((s) => s.yAxis === 'left'  && visible.has(s.key));
-    const hasRight = SERIES.some((s) => s.yAxis === 'right' && visible.has(s.key));
-
-    const leftSeries  = SERIES.filter((s) => s.yAxis === 'left');
-    const rightSeries = SERIES.filter((s) => s.yAxis === 'right');
+    const showCtr   = visible.has('ctr');
+    const showPos   = visible.has('position');
+    const bothCounts = visible.has('clicks') && visible.has('impressions');
+    const hasLeft   = visible.has('clicks') || visible.has('impressions');
+    const hasRight  = showCtr || showPos;
+    // When both CTR and position are visible, show CTR labels on the right axis;
+    // position axis is still present for correct scaling but its labels are hidden.
+    const showCtrLabels = showCtr;
+    const showPosLabels = showPos && !showCtr;
 
     return (
         <div className={className ?? 'w-full'}>
@@ -174,11 +195,13 @@ export function GscMultiSeriesChart({ data, granularity, timezone, className }: 
             </div>
 
             <div
+                ref={containerRef}
                 className="relative h-56"
                 style={{ userSelect: isSelecting ? 'none' : undefined }}
             >
-                <ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{ width: 0, height: 1 }}>
-                    <LineChart
+                {chartSize && <LineChart
+                        width={chartSize.w}
+                        height={chartSize.h}
                         data={displayData}
                         margin={{ top: 4, right: hasRight ? 56 : 8, left: 0, bottom: 0 }}
                         onMouseDown={handleMouseDown}
@@ -203,37 +226,51 @@ export function GscMultiSeriesChart({ data, granularity, timezone, className }: 
                             minTickGap={40}
                         />
 
-                        {/* Left Y-axis — click/impression counts */}
+                        {/* Left Y-axis — clicks + impressions.
+                            Log scale only when both are active: impressions are typically
+                            10-100× larger than clicks, so linear scale flattens clicks to zero. */}
                         <YAxis
                             yAxisId="left"
                             orientation="left"
+                            scale={bothCounts ? 'log' : 'linear'}
+                            domain={bothCounts ? [1, 'auto'] : [0, 'auto']}
+                            allowDataOverflow={bothCounts}
                             tickLine={false}
                             axisLine={false}
                             tick={{ fontSize: 11, fill: '#a1a1aa' }}
-                            tickFormatter={(v) => {
-                                const first = leftSeries.find((s) => visible.has(s.key));
-                                return first ? formatAxisTick(v, first.valueType) : String(v);
-                            }}
+                            tickFormatter={(v) => formatAxisTick(v, 'number')}
                             width={52}
                             hide={!hasLeft}
                         />
 
-                        {/* Right Y-axis — CTR % or position */}
+                        {/* CTR axis — separate from position so their scales don't conflict.
+                            CTR is a small fraction (0.01–0.15); sharing an axis with position
+                            (1–50) would make it appear flat near zero. */}
                         <YAxis
-                            yAxisId="right"
+                            yAxisId="ctr"
                             orientation="right"
+                            domain={[0, 'auto']}
                             tickLine={false}
                             axisLine={false}
-                            tick={{ fontSize: 11, fill: '#a1a1aa' }}
-                            tickFormatter={(v) => {
-                                const first = rightSeries.find((s) => visible.has(s.key));
-                                return first ? formatAxisTick(v, first.valueType) : String(v);
-                            }}
-                            width={44}
-                            hide={!hasRight}
-                            // Why: position axis is inverted — rank 1 is best, higher numbers are worse.
-                            // Reversing the domain puts the best rank at the top of the chart.
-                            reversed={visible.has('position') && !visible.has('ctr')}
+                            tick={{ fontSize: 11, fill: showCtrLabels ? '#a1a1aa' : 'transparent' }}
+                            tickFormatter={(v) => formatAxisTick(v, 'percent')}
+                            width={showCtrLabels ? 44 : 0}
+                            hide={!showCtr}
+                        />
+
+                        {/* Position axis — reversed so rank 1 (best) is at the top.
+                            Labels shown only when CTR is not also active (to avoid overlap). */}
+                        <YAxis
+                            yAxisId="position"
+                            orientation="right"
+                            reversed
+                            domain={['auto', 'auto']}
+                            tickLine={false}
+                            axisLine={false}
+                            tick={{ fontSize: 11, fill: showPosLabels ? '#a1a1aa' : 'transparent' }}
+                            tickFormatter={(v) => formatAxisTick(v, 'position')}
+                            width={showPosLabels ? 44 : 0}
+                            hide={!showPos}
                         />
 
                         <Tooltip
@@ -270,7 +307,7 @@ export function GscMultiSeriesChart({ data, granularity, timezone, className }: 
                             visible.has(s.key) ? (
                                 <Line
                                     key={s.key}
-                                    yAxisId={s.yAxis}
+                                    yAxisId={s.yAxisId}
                                     type="monotone"
                                     dataKey={s.key}
                                     name={s.key}
@@ -281,9 +318,26 @@ export function GscMultiSeriesChart({ data, granularity, timezone, className }: 
                                 />
                             ) : null,
                         )}
-                    </LineChart>
-                </ResponsiveContainer>
+                    </LineChart>}
             </div>
         </div>
     );
 }
+
+// Why: Inertia fires a second flushSync update ~190ms after navigation with new object references
+// but identical data. Without this, the animation restarts mid-draw creating a visible gap.
+// We compare data content (not reference) so identical data from Inertia's second update is blocked.
+function dataEqual(prev: Props, next: Props): boolean {
+    if (prev.granularity !== next.granularity) return false;
+    if (prev.timezone   !== next.timezone)     return false;
+    if (prev.className  !== next.className)    return false;
+    if (prev.data       === next.data)         return true;
+    if (prev.data.length !== next.data.length) return false;
+    return prev.data.every((p, i) => {
+        const n = next.data[i];
+        return p.date === n.date && p.clicks === n.clicks &&
+               p.impressions === n.impressions && p.ctr === n.ctr && p.position === n.position;
+    });
+}
+
+export const GscMultiSeriesChart = React.memo(GscMultiSeriesChartInner, dataEqual);

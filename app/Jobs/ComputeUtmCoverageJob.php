@@ -23,7 +23,7 @@ use Illuminate\Queue\SerializesModels;
  *             utm_unrecognized_sources
  *
  * Coverage statuses:
- *   green  → ≥80% of orders have any utm_source
+ *   green  → ≥80% of orders have attribution_source IN ('pys', 'wc_native')
  *   amber  → 50–80%
  *   red    → <50%
  *
@@ -68,7 +68,11 @@ class ComputeUtmCoverageJob implements ShouldQueue
     }
 
     /**
-     * Compute what percentage of the last 30 days' orders have any utm_source set.
+     * Compute what percentage of the last 30 days' orders have explicit UTM attribution.
+     *
+     * "Tagged" = attribution_source IN ('pys', 'wc_native') — orders where a UTM-tagged
+     * URL was tracked by PixelYourSite or WooCommerce native. Referrer-heuristic orders
+     * (source='referrer') do not count as tagged since no UTM link was clicked.
      *
      * Returns [float $pct, string $status] where $pct is 0–100 (null becomes 0).
      */
@@ -77,8 +81,8 @@ class ComputeUtmCoverageJob implements ShouldQueue
         $row = \Illuminate\Support\Facades\DB::selectOne(
             <<<SQL
                 SELECT
-                    COUNT(*)                                                AS total,
-                    COUNT(*) FILTER (WHERE utm_source IS NOT NULL)          AS tagged
+                    COUNT(*)                                                                        AS total,
+                    COUNT(*) FILTER (WHERE attribution_source IN ('pys', 'wc_native'))              AS tagged
                 FROM orders
                 WHERE workspace_id = ?
                   AND status IN ('completed', 'processing')

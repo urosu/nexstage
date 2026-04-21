@@ -62,7 +62,7 @@ return [
     // See: PLANNING.md "Performance Monitoring — PSI Rate Limit Planning"
     'psi' => [
         'api_key' => env('PSI_API_KEY'),
-        'timeout' => (int) env('PSI_TIMEOUT_SECONDS', 30),
+        'timeout' => (int) env('PSI_TIMEOUT_SECONDS', 60),
     ],
 
 ];

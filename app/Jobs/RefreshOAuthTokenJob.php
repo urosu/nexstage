@@ -22,7 +22,7 @@ use Illuminate\Support\Facades\Log;
 /**
  * Refreshes OAuth tokens for all Google Ads and GSC integrations.
  *
- * Queue:   high
+ * Queue:   default
  * Timeout: 60 s
  * Tries:   3
  * Backoff: [30, 120, 300] s
@@ -49,7 +49,7 @@ class RefreshOAuthTokenJob implements ShouldQueue
 
     public function __construct()
     {
-        $this->onQueue('high');
+        $this->onQueue('default');
     }
 
     public function handle(): void
@@ -93,6 +93,11 @@ class RefreshOAuthTokenJob implements ShouldQueue
                 ]);
             } catch (GoogleTokenExpiredException $e) {
                 $this->markGoogleAdsTokenExpired($full);
+            } catch (\Throwable $e) {
+                Log::error('RefreshOAuthTokenJob: unexpected error refreshing Google Ads token', [
+                    'ad_account_id' => $full->id,
+                    'error'         => $e->getMessage(),
+                ]);
             }
         }
     }
@@ -130,6 +135,11 @@ class RefreshOAuthTokenJob implements ShouldQueue
                 ]);
             } catch (GoogleTokenExpiredException $e) {
                 $this->markGscTokenExpired($full);
+            } catch (\Throwable $e) {
+                Log::error('RefreshOAuthTokenJob: unexpected error refreshing GSC token', [
+                    'property_id' => $full->id,
+                    'error'       => $e->getMessage(),
+                ]);
             }
         }
     }

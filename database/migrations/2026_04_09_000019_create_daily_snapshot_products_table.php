@@ -24,6 +24,19 @@ return new class extends Migration
             $table->decimal('revenue', 14, 4);
             $table->integer('units')->default(0);
             $table->smallInteger('rank');
+
+            // COGS snapshot — for Shopify stores where unit cost is on InventoryItem, not the order.
+            // A nightly job snapshots cost here so historical orders can look up cost from the
+            // snapshot date. NULL for WC stores (cost read directly from order item meta).
+            // @see PLANNING.md section 5, 7
+            $table->decimal('unit_cost', 12, 4)->nullable();
+
+            // Current stock state at snapshot time. Enables out-of-stock transition detection
+            // (Phase 1.6) and days-of-cover calculation without a second table.
+            // Populated from products.stock_status / stock_quantity at ComputeDailySnapshotJob time.
+            // @see PLANNING.md section 5.8
+            $table->string('stock_status', 20)->nullable();
+            $table->integer('stock_quantity')->nullable();
             $table->timestamp('created_at')->nullable();
 
             $table->unique(['store_id', 'snapshot_date', 'product_external_id']);

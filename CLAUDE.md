@@ -25,12 +25,24 @@ Ad platforms disagree with the store database. Default view shows one number; dr
 # After any PHP change, restart BOTH containers:
 docker restart nexstage-php nexstage-horizon
 
+# After adding a new route, clear the route cache (routes are cached in production-like envs):
+docker exec nexstage-php php artisan route:clear
+
 # Migrations
 docker exec nexstage-php php artisan migrate
 docker exec nexstage-php php artisan migrate:fresh --seed  # pre-launch only
 
 # Tests
 docker exec nexstage-php php artisan test
+
+# Ad-hoc PHP/DB queries — artisan tinker does NOT work in this Docker setup
+# (psysh can't write its config dir). Use php -r with a manual bootstrap instead:
+docker exec nexstage-php php -r '
+require "/var/www/html/vendor/autoload.php";
+$app = require "/var/www/html/bootstrap/app.php";
+$app->make(\Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+// ... your code here
+'
 ```
 
 Local OAuth callback: `tracey-unstiffened-leona.ngrok-free.dev`. AI model string: `claude-sonnet-4-6`.
@@ -44,7 +56,7 @@ Don't comment obvious code. Don't restate type hints. Magic numbers and threshol
 ## Gotchas (things that trip agents up on this codebase)
 
 - **Queue jobs don't inherit request scope.** `WorkspaceScope` is request-bound; inside a job, filter by `workspace_id` explicitly.
-- **`raw_meta` on orders does not contain attribution data** — only `fee_lines` and `customer_note`. Attribution lives in dedicated `attribution_*` columns (see PLANNING section 6) and in `orders.utm_*` during the parser rollout window.
+- **`raw_meta` on orders contains `fee_lines`, `customer_note`, and PYS data (`pys_enrich_data`, `pys_fb_cookie`).** It does NOT contain WC native attribution fields — those are promoted to dedicated `utm_*` columns. Attribution decisions live in `attribution_*` columns (see PLANNING section 6).
 - **`ad_insights` has no country column.** Country-level ad spend comes from `COALESCE(campaigns.parsed_convention->>'country', stores.primary_country_code, 'UNKNOWN')`. See PLANNING section 5.7.
 - **`BreakdownView` has zero data-fetching capability.** Controllers pre-join server-side and pass flat `BreakdownRow[]`. `cardData` is a display hint only.
 - **`fx_rates` is a cache, not a live fetch.** `FxRateService` is DB-first; never call Frankfurter at query time.

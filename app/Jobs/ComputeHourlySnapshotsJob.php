@@ -7,6 +7,7 @@ namespace App\Jobs;
 use App\Services\WorkspaceContext;
 use Carbon\Carbon;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -30,18 +31,24 @@ use Illuminate\Support\Facades\Log;
  *
  * Constructor params: (int $storeId, Carbon $date)
  */
-class ComputeHourlySnapshotsJob implements ShouldQueue
+class ComputeHourlySnapshotsJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 300;
-    public int $tries   = 3;
+    public int $timeout   = 300;
+    public int $tries     = 3;
+    public int $uniqueFor = 360;
 
     public function __construct(
         private readonly int    $storeId,
         private readonly Carbon $date,
     ) {
         $this->onQueue('low');
+    }
+
+    public function uniqueId(): string
+    {
+        return "{$this->storeId}:{$this->date->toDateString()}";
     }
 
     public function handle(): void
@@ -69,8 +76,9 @@ class ComputeHourlySnapshotsJob implements ShouldQueue
                 COUNT(*)::int                            AS orders_count,
                 SUM(total_in_reporting_currency)         AS revenue
             ")
+            ->where('workspace_id', $workspaceId)
             ->where('store_id', $this->storeId)
-            ->whereRaw("occurred_at::date = ?", [$dateStr])
+            ->whereBetween('occurred_at', [$dateStr . ' 00:00:00', $dateStr . ' 23:59:59'])
             ->whereIn('status', ['completed', 'processing'])
             ->groupByRaw('EXTRACT(HOUR FROM occurred_at)')
             ->get();

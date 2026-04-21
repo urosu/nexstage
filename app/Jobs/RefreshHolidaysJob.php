@@ -105,6 +105,23 @@ class RefreshHolidaysJob implements ShouldQueue
         $this->onQueue('low');
     }
 
+    /**
+     * Yasumi returns the camelCase short-name key (e.g. "germanUnityDay") when
+     * no translation exists for the requested locale. Convert those to readable
+     * title case so the UI never shows raw identifiers.
+     */
+    private static function resolveName(string $name): string
+    {
+        // If the name contains a space it's already a proper translation.
+        if (str_contains($name, ' ')) {
+            return $name;
+        }
+
+        // camelCase → "German Unity Day"
+        $spaced = preg_replace('/([A-Z])/', ' $1', $name) ?? $name;
+        return ucwords(strtolower(trim($spaced)));
+    }
+
     public function handle(): void
     {
         $provider = self::COUNTRY_TO_PROVIDER[$this->countryCode] ?? null;
@@ -117,7 +134,7 @@ class RefreshHolidaysJob implements ShouldQueue
             return;
         }
 
-        $holidays = Yasumi::create($provider, $this->year);
+        $holidays = Yasumi::create($provider, $this->year, 'en_US');
 
         $rows = [];
 
@@ -125,7 +142,7 @@ class RefreshHolidaysJob implements ShouldQueue
             $rows[] = [
                 'country_code' => $this->countryCode,
                 'date'         => $holiday->format('Y-m-d'),
-                'name'         => $holiday->getName(),
+                'name'         => self::resolveName($holiday->getName()),
                 'year'         => $this->year,
                 'created_at'   => now(),
             ];

@@ -46,6 +46,9 @@ class RegisteredUserController extends Controller
             'email'            => 'required|string|lowercase|email|max:255|unique:'.User::class,
             'password'         => ['required', 'confirmed', Rules\Password::defaults()],
             'invitation_token' => 'nullable|string|max:255',
+        ], [
+            // Generic message avoids revealing whether the email already has an account.
+            'email.unique' => 'Unable to complete registration. If you already have an account, please log in.',
         ]);
 
         // Store invitation token before email verification so VerifyEmailController can use it

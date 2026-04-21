@@ -24,6 +24,7 @@ class StoreFactory extends Factory
             'slug'                     => $this->faker->unique()->slug(),
             'domain'                   => $this->faker->unique()->domainName(),
             'type'                     => 'woocommerce',
+            'platform'                 => 'woocommerce',
             'currency'                 => 'EUR',
             'timezone'                 => 'Europe/Berlin',
             'status'                   => 'active',

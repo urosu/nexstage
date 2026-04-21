@@ -38,7 +38,9 @@ class EnforceBillingAccessTest extends TestCase
             'billing_plan'  => null,
         ]);
 
-        $response = $this->actingAs($user)->get('/dashboard');
+        // Use a real session-based route (not workspace-prefixed) so SetActiveWorkspace
+        // can resolve the workspace context before the billing middleware checks it.
+        $response = $this->actingAs($user)->get('/profile');
 
         $response->assertRedirect('/settings/billing');
     }
@@ -50,7 +52,7 @@ class EnforceBillingAccessTest extends TestCase
             'billing_plan'  => null,
         ]);
 
-        $response = $this->actingAs($user)->get('/dashboard');
+        $response = $this->actingAs($user)->get('/profile');
 
         $this->assertStringNotContainsString('/settings/billing', $response->headers->get('Location', ''));
     }
@@ -62,7 +64,7 @@ class EnforceBillingAccessTest extends TestCase
             'billing_plan'  => 'starter',
         ]);
 
-        $response = $this->actingAs($user)->get('/dashboard');
+        $response = $this->actingAs($user)->get('/profile');
 
         $this->assertStringNotContainsString('/settings/billing', $response->headers->get('Location', ''));
     }

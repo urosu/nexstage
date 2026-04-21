@@ -2,12 +2,12 @@ import { Link, router } from '@inertiajs/react';
 
 interface Props {
     children: React.ReactNode;
-    currentStep: 1 | 2 | 3;
+    currentStep: 1 | 2 | 3 | 4;
 }
 
 // Related: resources/js/Pages/Onboarding/Index.tsx (only consumer)
 export default function OnboardingLayout({ children, currentStep }: Props) {
-    const steps = ['Connect', 'Choose history', 'Importing data'];
+    const steps = ['Connect', 'Store setup', 'Choose history', 'Importing data'];
 
     return (
         <div className="flex min-h-screen flex-col items-center bg-zinc-50 px-4 py-12">

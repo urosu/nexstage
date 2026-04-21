@@ -1,14 +1,29 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Head, Link, router, usePage } from '@inertiajs/react';
+
+// Why: When Inertia swaps components via flushSync mid-navigation, the new component
+// initialises with useState(false) and renders stale cached data before the real server
+// response arrives. Tracking navigation state at module level lets us start with
+// navigating=true so the skeleton stays visible until the real data is ready.
+let _inertiaNavigating = false;
+router.on('start',  () => { _inertiaNavigating = true; });
+router.on('finish', () => { _inertiaNavigating = false; });
+
 import { BarChart2, Table2, Grid2X2 } from 'lucide-react';
 import AppLayout from '@/Components/layouts/AppLayout';
 import { DateRangePicker } from '@/Components/shared/DateRangePicker';
 import { PageHeader } from '@/Components/shared/PageHeader';
 import { CampaignsTabBar } from '@/Components/shared/CampaignsTabBar';
 import { StatusBadge } from '@/Components/shared/StatusBadge';
+import { SortButton } from '@/Components/shared/SortButton';
+import { PlatformBadge } from '@/Components/shared/PlatformBadge';
+import { ToggleGroup } from '@/Components/shared/ToggleGroup';
+import { WlFilterBar } from '@/Components/shared/WlFilterBar';
+import type { WlClassifier, WlFilter } from '@/Components/shared/WlFilterBar';
 import { QuadrantChart, type QuadrantCampaign } from '@/Components/charts/QuadrantChart';
 import { formatCurrency, formatNumber } from '@/lib/formatters';
 import { cn } from '@/lib/utils';
+import { wurl } from '@/lib/workspace-url';
 import type { PageProps } from '@/types';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -31,6 +46,7 @@ interface AdRow {
     real_roas: number | null;
     attributed_revenue: number | null;
     attributed_orders: number;
+    wl_tag: 'winner' | 'loser' | null;
 }
 
 interface AdAccountOption {
@@ -45,6 +61,10 @@ interface Props {
     has_ad_accounts: boolean;
     ad_accounts: AdAccountOption[];
     ads: AdRow[];
+    ads_total_count: number;
+    active_classifier: WlClassifier;
+    wl_has_target: boolean;
+    wl_peer_avg_roas: number | null;
     campaign_name: string | null;
     adset_name: string | null;
     workspace_target_roas: number | null;
@@ -57,73 +77,11 @@ interface Props {
     direction: 'asc' | 'desc';
     campaign_id: number | null;
     adset_id: number | null;
+    filter: WlFilter;
+    classifier: WlClassifier | null;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-const PLATFORM_COLORS: Record<string, string> = {
-    facebook: 'bg-blue-50 text-blue-700',
-    google:   'bg-red-50 text-red-700',
-};
-
-function PlatformBadge({ platform }: { platform: string }) {
-    return (
-        <span className={cn(
-            'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium capitalize',
-            PLATFORM_COLORS[platform] ?? 'bg-zinc-100 text-zinc-500',
-        )}>
-            {platform}
-        </span>
-    );
-}
-
-function ToggleGroup<T extends string>({
-    options, value, onChange,
-}: {
-    options: { label: string; value: T }[];
-    value: T;
-    onChange: (v: T) => void;
-}) {
-    return (
-        <div className="inline-flex rounded-lg border border-zinc-200 bg-zinc-50 p-0.5">
-            {options.map((opt) => (
-                <button
-                    key={opt.value}
-                    onClick={() => onChange(opt.value)}
-                    className={cn(
-                        'rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
-                        value === opt.value
-                            ? 'bg-white text-zinc-900 shadow-sm'
-                            : 'text-zinc-500 hover:text-zinc-700',
-                    )}
-                >
-                    {opt.label}
-                </button>
-            ))}
-        </div>
-    );
-}
-
-function SortButton({
-    col, label, currentSort, currentDir, onSort,
-}: {
-    col: string; label: string; currentSort: string; currentDir: 'asc' | 'desc'; onSort: (col: string) => void;
-}) {
-    const active = currentSort === col;
-    return (
-        <button
-            onClick={() => onSort(col)}
-            className={cn('flex items-center gap-1 hover:text-zinc-700 transition-colors', active ? 'text-primary' : 'text-zinc-400')}
-        >
-            {label}
-            {active && <span className="text-[10px]">{currentDir === 'desc' ? '↓' : '↑'}</span>}
-        </button>
-    );
-}
-
-function navigate(params: Record<string, string | number | undefined>) {
-    router.get('/campaigns/ads', params as Record<string, string>, { preserveState: true, replace: true });
-}
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
@@ -131,19 +89,28 @@ export default function Ads(props: Props) {
     const { workspace } = usePage<PageProps>().props;
     const currency = workspace?.reporting_currency ?? 'EUR';
 
+    function navigate(params: Record<string, string | number | undefined>) {
+        router.get(wurl(workspace?.slug, '/campaigns/ads'), params as Record<string, string>, { preserveState: true, replace: true });
+    }
+
     const {
         has_ad_accounts,
         ads,
+        ads_total_count,
+        active_classifier,
+        wl_has_target,
+        wl_peer_avg_roas,
         campaign_name,
         adset_name,
         workspace_target_roas,
         from, to,
         platform, status, view, sort, direction,
         campaign_id, adset_id,
+        filter,
+        classifier,
     } = props;
 
-    const [navigating, setNavigating] = useState(false);
-    const [roasFilter, setRoasFilter] = useState<'all' | 'winners' | 'losers'>('all');
+    const [navigating, setNavigating] = useState(() => _inertiaNavigating);
     const [roasType, setRoasType] = useState<'real' | 'platform'>('real');
 
     useEffect(() => {
@@ -152,45 +119,12 @@ export default function Ads(props: Props) {
         return () => { off1(); off2(); };
     }, []);
 
-    useEffect(() => {
-        setRoasFilter('all');
-    }, [ads]);
-
-    const roasThreshold = workspace_target_roas ?? 1.0;
-
-    const filteredAds = useMemo(() => {
-        if (roasFilter === 'all') return ads;
-        return ads.filter(a => {
-            // Zero-spend ads are dormant, not losers — exclude from losers filter
-            if (roasFilter === 'losers' && !a.spend) return false;
-            const roas = roasType === 'real' ? a.real_roas : a.platform_roas;
-            if (roas === null) return roasFilter === 'losers';
-            return roasFilter === 'winners' ? roas >= roasThreshold : roas < roasThreshold;
-        });
-    }, [ads, roasFilter, roasThreshold, roasType]);
-
-    // Quadrant uses filteredAds so winners/losers chips work in both table and quadrant view.
-    const quadrantData: QuadrantCampaign[] = useMemo(() => {
-        return filteredAds
-            .filter(a => (roasType === 'real' ? a.real_roas : a.platform_roas) !== null)
-            .map(a => ({
-                id:                 a.id,
-                name:               a.name,
-                platform:           a.platform,
-                spend:              a.spend,
-                real_roas:          roasType === 'real' ? a.real_roas : a.platform_roas,
-                attributed_revenue: roasType === 'real' ? a.attributed_revenue : null,
-                attributed_orders:  roasType === 'real' ? a.attributed_orders  : 0,
-            }));
-    }, [filteredAds, roasType]);
-    const hiddenCount = filteredAds.filter(
-        a => (roasType === 'real' ? a.real_roas : a.platform_roas) === null,
-    ).length;
-
     const currentParams = {
         from, to, platform, status, view, sort, direction,
-        ...(campaign_id ? { campaign_id: String(campaign_id) } : {}),
-        ...(adset_id    ? { adset_id:    String(adset_id) }    : {}),
+        ...(campaign_id  ? { campaign_id:  String(campaign_id) }  : {}),
+        ...(adset_id     ? { adset_id:     String(adset_id) }     : {}),
+        ...(filter !== 'all' ? { filter } : {}),
+        ...(classifier   ? { classifier } : {}),
     };
 
     function setPlatform(v: 'all' | 'facebook' | 'google') {
@@ -206,6 +140,30 @@ export default function Ads(props: Props) {
         const newDir = sort === col && direction === 'desc' ? 'asc' : 'desc';
         navigate({ ...currentParams, sort: col, direction: newDir });
     }
+    function setFilter(f: 'all' | 'winners' | 'losers') {
+        navigate({ ...currentParams, ...(f !== 'all' ? { filter: f } : { filter: undefined }) });
+    }
+    function setClassifier(c: WlClassifier) {
+        navigate({ ...currentParams, classifier: c });
+    }
+
+    // Quadrant uses the server-filtered ads so W/L chips affect both views.
+    const quadrantData: QuadrantCampaign[] = useMemo(() => {
+        return ads
+            .filter(a => (roasType === 'real' ? a.real_roas : a.platform_roas) !== null)
+            .map(a => ({
+                id:                 a.id,
+                name:               a.name,
+                platform:           a.platform,
+                spend:              a.spend,
+                real_roas:          roasType === 'real' ? a.real_roas : a.platform_roas,
+                attributed_revenue: roasType === 'real' ? a.attributed_revenue : null,
+                attributed_orders:  roasType === 'real' ? a.attributed_orders  : 0,
+            }));
+    }, [ads, roasType]);
+    const hiddenCount = ads.filter(
+        a => (roasType === 'real' ? a.real_roas : a.platform_roas) === null,
+    ).length;
 
     const subtitle = adset_name
         ? `Ads in "${adset_name}"`
@@ -250,18 +208,18 @@ export default function Ads(props: Props) {
 
             {/* ── Breadcrumb — always visible ── */}
             <div className="mb-4 flex items-center gap-1.5 text-sm text-zinc-500">
-                <Link href={`/campaigns?from=${from}&to=${to}`} className="hover:text-zinc-700 transition-colors">
+                <Link href={wurl(workspace?.slug, `/campaigns?from=${from}&to=${to}`)} className="hover:text-zinc-700 transition-colors">
                     Campaigns
                 </Link>
                 <span className="text-zinc-300">›</span>
-                <Link href={`/campaigns/adsets?from=${from}&to=${to}`} className="hover:text-zinc-700 transition-colors">
+                <Link href={wurl(workspace?.slug, `/campaigns/adsets?from=${from}&to=${to}`)} className="hover:text-zinc-700 transition-colors">
                     Ad Sets
                 </Link>
                 {adset_id && campaign_name && (
                     <>
                         <span className="text-zinc-300">›</span>
                         <Link
-                            href={`/campaigns/adsets?campaign_id=${campaign_id ?? ''}&from=${from}&to=${to}`}
+                            href={wurl(workspace?.slug, `/campaigns/adsets?campaign_id=${campaign_id ?? ''}&from=${from}&to=${to}`)}
                             className="hover:text-zinc-700 transition-colors"
                         >
                             {campaign_name}
@@ -329,39 +287,19 @@ export default function Ads(props: Props) {
                     </button>
                 </div>
 
-                {/* Winners / Losers — visible in both table and quadrant view */}
-                <div className="flex items-center gap-1">
-                    {(['all', 'winners', 'losers'] as const).map(f => (
-                        <button
-                            key={f}
-                            onClick={() => setRoasFilter(f)}
-                            className={cn(
-                                'rounded-full border px-3 py-1 text-xs font-medium transition-colors',
-                                roasFilter === f
-                                    ? f === 'winners'
-                                        ? 'border-green-300 bg-green-50 text-green-700'
-                                        : f === 'losers'
-                                        ? 'border-red-300 bg-red-50 text-red-700'
-                                        : 'border-primary bg-primary/10 text-primary'
-                                    : 'border-zinc-200 text-zinc-500 hover:border-zinc-300 hover:text-zinc-700',
-                            )}
-                            title={
-                                f === 'winners'
-                                    ? `Platform ROAS ≥ ${roasThreshold.toFixed(2)}×`
-                                    : f === 'losers'
-                                    ? `Platform ROAS < ${roasThreshold.toFixed(2)}×`
-                                    : 'Show all ads'
-                            }
-                        >
-                            {f === 'all' ? 'All' : f === 'winners' ? '🏆 Winners' : '📉 Losers'}
-                        </button>
-                    ))}
-                    {roasFilter !== 'all' && (
-                        <span className="text-xs text-zinc-400">
-                            {filteredAds.length} / {ads.length}
-                        </span>
-                    )}
-                </div>
+                {/* Winners / Losers — server-side filtered, same 3 classifiers as campaigns */}
+                <WlFilterBar
+                    filter={filter}
+                    totalCount={ads_total_count}
+                    filteredCount={ads.length}
+                    activeClassifier={active_classifier}
+                    hasTarget={wl_has_target}
+                    targetRoas={workspace_target_roas}
+                    peerAvgRoas={wl_peer_avg_roas}
+                    allLabel="Show all ads"
+                    onFilterChange={setFilter}
+                    onClassifierChange={setClassifier}
+                />
             </div>
 
             {/* ── Quadrant view ── */}
@@ -371,7 +309,7 @@ export default function Ads(props: Props) {
                         <div>
                             <div className="text-sm font-medium text-zinc-500">Performance quadrant</div>
                             <p className="mt-0.5 text-xs text-zinc-400">
-                                Each bubble is one ad. X = spend (log), Y = platform ROAS (log).
+                                Each bubble is one ad. X = spend (log), Y = {roasType === 'real' ? 'Real' : 'Platform'} ROAS (log).
                             </p>
                         </div>
                         {/* Real ROAS uses utm_term → ad attribution; Platform uses ad platform's own reporting */}
@@ -413,22 +351,22 @@ export default function Ads(props: Props) {
                 <div className="flex items-center border-b border-zinc-100 px-5 py-4">
                     <div className="text-sm font-medium text-zinc-500">
                         Ads
-                        {ads.length > 0 && (
+                        {ads_total_count > 0 && (
                             <span className="ml-2 rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-500">
-                                {filteredAds.length}{roasFilter !== 'all' ? ` / ${ads.length}` : ''}
+                                {ads.length}{filter !== 'all' ? ` / ${ads_total_count}` : ''}
                             </span>
                         )}
                     </div>
                 </div>
 
-                {filteredAds.length === 0 ? (
+                {ads.length === 0 ? (
                     <div className="flex flex-col items-center justify-center py-16 text-center">
                         <p className="text-sm text-zinc-400">
-                            {ads.length === 0
+                            {ads_total_count === 0
                                 ? 'No ads found for this account.'
-                                : `No ${roasFilter} for this period.`}
+                                : `No ${filter} for this period.`}
                         </p>
-                        {ads.length === 0 && (
+                        {ads_total_count === 0 && (
                             <p className="mt-1 text-xs text-zinc-400">
                                 Ad structure is synced hourly. Check back after the next sync.
                             </p>
@@ -438,13 +376,14 @@ export default function Ads(props: Props) {
                     <div className="overflow-x-auto">
                         <table className="w-full text-sm">
                             <thead>
-                                <tr className="text-left text-xs font-medium uppercase tracking-wide text-zinc-400">
+                                <tr className="text-left th-label">
                                     <th className="px-5 py-3">Ad</th>
                                     {!adset_id && <th className="px-5 py-3">Ad Set</th>}
                                     {!campaign_id && !adset_id && <th className="px-5 py-3">Campaign</th>}
                                     <th className="px-5 py-3">Platform</th>
                                     <th className="px-5 py-3">Status</th>
                                     <th className="px-5 py-3 text-right">{sortBtn('spend', 'Spend')}</th>
+                                    <th className="px-5 py-3 text-right">{sortBtn('real_roas', 'Real ROAS')}</th>
                                     <th className="px-5 py-3 text-right">{sortBtn('platform_roas', 'Platform ROAS')}</th>
                                     <th className="px-5 py-3 text-right">{sortBtn('impressions', 'Impressions')}</th>
                                     <th className="px-5 py-3 text-right">{sortBtn('clicks', 'Clicks')}</th>
@@ -453,18 +392,22 @@ export default function Ads(props: Props) {
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-zinc-100">
-                                {filteredAds.map((a) => (
+                                {ads.map((a) => (
                                     <tr key={a.id} className={cn('hover:bg-zinc-50', navigating && 'opacity-60')}>
                                         <td className="max-w-[220px] px-5 py-3">
-                                            <span className="block truncate font-medium text-zinc-800" title={a.name}>
-                                                {a.name || '—'}
-                                            </span>
+                                            <div className="flex items-center gap-1.5">
+                                                {a.wl_tag === 'winner' && <span title="Winner">🏆</span>}
+                                                {a.wl_tag === 'loser'  && <span title="Loser">📉</span>}
+                                                <span className="block truncate font-medium text-zinc-800" title={a.name}>
+                                                    {a.name || '—'}
+                                                </span>
+                                            </div>
                                         </td>
                                         {!adset_id && (
                                             <td className="max-w-[160px] px-5 py-3">
                                                 {/* Ad set name — click to filter to this adset's ads */}
                                                 <Link
-                                                    href={`/campaigns/ads?adset_id=${a.adset_id}&from=${from}&to=${to}`}
+                                                    href={wurl(workspace?.slug, `/campaigns/ads?adset_id=${a.adset_id}&from=${from}&to=${to}`)}
                                                     className="block truncate text-zinc-600 hover:text-primary transition-colors"
                                                     title={a.adset_name}
                                                 >
@@ -476,7 +419,7 @@ export default function Ads(props: Props) {
                                             <td className="max-w-[160px] px-5 py-3">
                                                 {/* Campaign name — click to see all adsets in that campaign */}
                                                 <Link
-                                                    href={`/campaigns/adsets?campaign_id=${a.campaign_id}&from=${from}&to=${to}`}
+                                                    href={wurl(workspace?.slug, `/campaigns/adsets?campaign_id=${a.campaign_id}&from=${from}&to=${to}`)}
                                                     className="block truncate text-zinc-600 hover:text-primary transition-colors"
                                                     title={a.campaign_name}
                                                 >
@@ -494,10 +437,20 @@ export default function Ads(props: Props) {
                                             {a.spend > 0 ? formatCurrency(a.spend, currency) : <span className="text-zinc-300">—</span>}
                                         </td>
                                         <td className="px-5 py-3 text-right tabular-nums">
-                                            {a.platform_roas != null ? (
-                                                <span className={a.platform_roas >= roasThreshold ? 'text-green-700 font-medium' : 'text-blue-600 font-medium'}>
-                                                    {a.platform_roas.toFixed(2)}×
+                                            {a.real_roas != null ? (
+                                                <span className={cn(
+                                                    'font-medium',
+                                                    a.wl_tag === 'winner' ? 'text-green-700' : a.wl_tag === 'loser' ? 'text-red-600' : 'text-zinc-700',
+                                                )}>
+                                                    {a.real_roas.toFixed(2)}×
                                                 </span>
+                                            ) : (
+                                                <span className="text-zinc-300">—</span>
+                                            )}
+                                        </td>
+                                        <td className="px-5 py-3 text-right tabular-nums text-zinc-500">
+                                            {a.platform_roas != null ? (
+                                                <span>{a.platform_roas.toFixed(2)}×</span>
                                             ) : (
                                                 <span className="text-zinc-300">—</span>
                                             )}

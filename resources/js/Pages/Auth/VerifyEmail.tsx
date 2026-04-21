@@ -32,7 +32,7 @@ export default function VerifyEmail({ status }: { status?: string }) {
 
             <form onSubmit={submit}>
                 <div className="mt-4 flex items-center justify-between">
-                    <Button disabled={processing}>
+                    <Button type="submit" disabled={processing}>
                         Resend Verification Email
                     </Button>
 

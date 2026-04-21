@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Head, router } from '@inertiajs/react';
+import { useState } from 'react';
+import { Head, router, usePage } from '@inertiajs/react';
 import {
     LineChart,
     Line,
@@ -16,6 +16,7 @@ import AppLayout from '@/Components/layouts/AppLayout';
 import { DateRangePicker } from '@/Components/shared/DateRangePicker';
 import { PageHeader } from '@/Components/shared/PageHeader';
 import { cn } from '@/lib/utils';
+import { wurl } from '@/lib/workspace-url';
 import type { PageProps } from '@/types';
 import type { HolidayOverlay, WorkspaceEventOverlay } from '@/Components/charts/MultiSeriesLineChart';
 
@@ -31,6 +32,8 @@ interface StoreUrlItem {
     store_slug: string | null;
 }
 
+type CruxSource = 'url' | 'origin' | null;
+
 interface LatestScores {
     performance_score: number | null;
     seo_score: number | null;
@@ -42,6 +45,12 @@ interface LatestScores {
     inp_ms: number | null;
     ttfb_ms: number | null;
     tbt_ms: number | null;
+    crux_source: CruxSource;
+    crux_lcp_p75_ms: number | null;
+    crux_inp_p75_ms: number | null;
+    crux_cls_p75: number | null;
+    crux_fcp_p75_ms: number | null;
+    crux_ttfb_p75_ms: number | null;
     checked_at: string | null;
 }
 
@@ -55,12 +64,24 @@ interface HistoryPoint {
     lcp_ms: number | null;
     cls_score: number | null;
     inp_ms: number | null;
+    crux_source: CruxSource;
+    crux_lcp_p75_ms: number | null;
+    crux_inp_p75_ms: number | null;
+    crux_cls_p75: number | null;
+}
+
+interface ScoreDelta {
+    performance:    number | null;
+    seo:            number | null;
+    accessibility:  number | null;
+    best_practices: number | null;
 }
 
 interface UrlSummaryRow extends StoreUrlItem {
     mobile_performance_score: number | null;
     mobile_seo_score: number | null;
     mobile_lcp_ms: number | null;
+    mobile_inp_ms: number | null;
     desktop_performance_score: number | null;
     desktop_seo_score: number | null;
     desktop_lcp_ms: number | null;
@@ -74,6 +95,8 @@ interface Props extends PageProps {
     desktop_latest: LatestScores | null;
     mobile_history: HistoryPoint[];
     desktop_history: HistoryPoint[];
+    mobile_score_delta: ScoreDelta | null;
+    desktop_score_delta: ScoreDelta | null;
     url_summary: UrlSummaryRow[];
     holiday_overlays: HolidayOverlay[];
     workspace_event_overlays: WorkspaceEventOverlay[];
@@ -165,13 +188,9 @@ function fmtDate(iso: string): string {
     return new Date(iso).toLocaleDateString('en', { month: 'short', day: 'numeric' });
 }
 
-function navigate(params: Record<string, string | number | undefined>) {
-    router.get('/performance', params as Record<string, string>, { preserveState: true, replace: true });
-}
-
 // ─── Score card ───────────────────────────────────────────────────────────────
 
-function ScoreCard({ label, score }: { label: string; score: number | null }) {
+function ScoreCard({ label, score, delta }: { label: string; score: number | null; delta?: number | null }) {
     const grade = scoreGrade(score);
     return (
         <div className={cn('rounded-xl border p-4 space-y-1', scoreBg(grade))}>
@@ -180,30 +199,57 @@ function ScoreCard({ label, score }: { label: string; score: number | null }) {
                 {score !== null ? score : '—'}
             </div>
             <div className="text-xs text-zinc-400">/ 100</div>
+            {delta != null && (
+                <div className={cn(
+                    'flex w-fit items-center rounded-full px-1.5 py-0.5 text-xs font-semibold',
+                    delta > 0  ? 'bg-green-100 text-green-700'
+                    : delta < 0 ? 'bg-red-100 text-red-700'
+                    :             'bg-zinc-100 text-zinc-500',
+                )}>
+                    {delta > 0 ? '+' : ''}{delta} pts
+                </div>
+            )}
         </div>
     );
 }
 
 // ─── CWV card ─────────────────────────────────────────────────────────────────
 
+// Source badge config: Field (real Chrome users) > Origin (domain-level) > Lab (synthetic)
+const CRUX_SOURCE_BADGE: Record<string, { label: string; className: string }> = {
+    url:    { label: 'Field',   className: 'bg-emerald-50 text-emerald-700 border border-emerald-200' },
+    origin: { label: 'Origin',  className: 'bg-blue-50 text-blue-700 border border-blue-200' },
+    lab:    { label: 'Lab',     className: 'bg-zinc-100 text-zinc-500 border border-zinc-200' },
+};
+
 function CwvCard({
     label,
     value,
     grade,
     description,
+    source,
 }: {
     label: string;
     value: string;
     grade: CwvGrade;
     description: string;
+    source?: string | null;
 }) {
+    const badge = source ? CRUX_SOURCE_BADGE[source] : null;
     return (
         <div className="rounded-xl border border-zinc-200 bg-white p-4 space-y-1">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-1">
                 <span className="text-xs font-medium text-zinc-500">{label}</span>
-                <span className={cn('rounded-full px-2 py-0.5 text-xs font-semibold', cwvBadgeClass(grade))}>
-                    {cwvGradeLabel(grade)}
-                </span>
+                <div className="flex items-center gap-1.5">
+                    {badge && (
+                        <span className={cn('rounded-full px-1.5 py-0.5 text-xs font-medium', badge.className)}>
+                            {badge.label}
+                        </span>
+                    )}
+                    <span className={cn('rounded-full px-2 py-0.5 text-xs font-semibold', cwvBadgeClass(grade))}>
+                        {cwvGradeLabel(grade)}
+                    </span>
+                </div>
             </div>
             <div className="text-xl font-semibold text-zinc-900 tabular-nums">{value}</div>
             <div className="text-xs text-zinc-400">{description}</div>
@@ -217,14 +263,15 @@ function CwvCard({
 function StrategyColumn({
     label,
     scores,
+    delta,
 }: {
     label: string;
     scores: LatestScores | null;
+    delta?: ScoreDelta | null;
 }) {
     const lastChecked = scores?.checked_at
-        ? new Date(scores.checked_at).toLocaleString('en', {
+        ? new Date(scores.checked_at).toLocaleDateString('en', {
               month: 'short', day: 'numeric',
-              hour: '2-digit', minute: '2-digit',
           })
         : null;
 
@@ -246,38 +293,57 @@ function StrategyColumn({
                 <>
                     {/* Lighthouse score cards */}
                     <div className="grid grid-cols-2 gap-3">
-                        <ScoreCard label="Performance"    score={scores.performance_score} />
-                        <ScoreCard label="Accessibility"  score={scores.accessibility_score} />
-                        <ScoreCard label="SEO"            score={scores.seo_score} />
-                        <ScoreCard label="Best Practices" score={scores.best_practices_score} />
+                        <ScoreCard label="Performance"    score={scores.performance_score}    delta={delta?.performance} />
+                        <ScoreCard label="Accessibility"  score={scores.accessibility_score}  delta={delta?.accessibility} />
+                        <ScoreCard label="SEO"            score={scores.seo_score}            delta={delta?.seo} />
+                        <ScoreCard label="Best Practices" score={scores.best_practices_score} delta={delta?.best_practices} />
                     </div>
 
-                    {/* Core Web Vitals */}
+                    {/* Core Web Vitals — prefer CrUX field data, fall back to lab */}
                     <div className="grid grid-cols-2 gap-3">
-                        <CwvCard
-                            label="LCP"
-                            value={fmtMs(scores.lcp_ms)}
-                            grade={lcpGrade(scores.lcp_ms)}
-                            description="Largest Contentful Paint · ≤ 2.5 s"
-                        />
-                        <CwvCard
-                            label="CLS"
-                            value={fmtCls(scores.cls_score)}
-                            grade={clsGrade(scores.cls_score)}
-                            description="Layout Shift · ≤ 0.10"
-                        />
-                        <CwvCard
-                            label="INP"
-                            value={fmtMs(scores.inp_ms)}
-                            grade={inpGrade(scores.inp_ms)}
-                            description="Interaction to Next Paint · ≤ 200 ms"
-                        />
-                        <CwvCard
-                            label="TTFB"
-                            value={fmtMs(scores.ttfb_ms)}
-                            grade="unknown"
-                            description="Time to First Byte · lab"
-                        />
+                        {(() => {
+                            const cruxSource = scores.crux_source;
+                            const lcpVal  = scores.crux_lcp_p75_ms ?? scores.lcp_ms;
+                            const clsVal  = scores.crux_cls_p75    ?? scores.cls_score;
+                            const inpVal  = scores.crux_inp_p75_ms ?? scores.inp_ms;
+                            const ttfbVal = scores.crux_ttfb_p75_ms ?? scores.ttfb_ms;
+                            const cwvSrc  = (_: number | null, cruxV: number | null) =>
+                                cruxV != null ? (cruxSource ?? 'lab') : 'lab';
+                            return (
+                                <>
+                                    <CwvCard
+                                        label="LCP"
+                                        value={fmtMs(lcpVal)}
+                                        grade={lcpGrade(lcpVal)}
+                                        source={cwvSrc(scores.lcp_ms, scores.crux_lcp_p75_ms)}
+                                        description="Largest Contentful Paint · ≤ 2.5 s"
+                                    />
+                                    <CwvCard
+                                        label="CLS"
+                                        value={fmtCls(clsVal)}
+                                        grade={clsGrade(clsVal)}
+                                        source={cwvSrc(scores.cls_score, scores.crux_cls_p75)}
+                                        description="Cumulative Layout Shift · ≤ 0.10"
+                                    />
+                                    <CwvCard
+                                        label="INP"
+                                        value={fmtMs(inpVal)}
+                                        grade={inpGrade(inpVal)}
+                                        source={cwvSrc(scores.inp_ms, scores.crux_inp_p75_ms)}
+                                        description={inpVal === null
+                                            ? 'Interaction to Next Paint · no data (requires real users)'
+                                            : 'Interaction to Next Paint · ≤ 200 ms'}
+                                    />
+                                    <CwvCard
+                                        label="TTFB"
+                                        value={fmtMs(ttfbVal)}
+                                        grade="unknown"
+                                        source={cwvSrc(scores.ttfb_ms, scores.crux_ttfb_p75_ms)}
+                                        description="Time to First Byte"
+                                    />
+                                </>
+                            );
+                        })()}
                     </div>
                 </>
             )}
@@ -288,6 +354,16 @@ function StrategyColumn({
 // ─── Score trend chart ────────────────────────────────────────────────────────
 
 type ChartStrategy = 'mobile' | 'desktop';
+
+// Hex values mirror the --chart-* CSS variables (indigo, emerald, amber, rose).
+const SCORE_SERIES = [
+    { key: 'performance_score',    label: 'Performance',    color: '#4f46e5' },
+    { key: 'seo_score',            label: 'SEO',            color: '#10b981' },
+    { key: 'accessibility_score',  label: 'Accessibility',  color: '#f59e0b' },
+    { key: 'best_practices_score', label: 'Best Practices', color: '#f43f5e' },
+] as const;
+
+type ScoreSeriesKey = typeof SCORE_SERIES[number]['key'];
 
 function ScoreTrendChart({
     mobileHistory,
@@ -301,7 +377,22 @@ function ScoreTrendChart({
     workspaceEvents: WorkspaceEventOverlay[];
 }) {
     const [strategy, setStrategy] = useState<ChartStrategy>('mobile');
+    const [visible, setVisible] = useState<Set<ScoreSeriesKey>>(
+        () => new Set<ScoreSeriesKey>(['performance_score']),
+    );
     const data = strategy === 'mobile' ? mobileHistory : desktopHistory;
+
+    function toggleSeries(key: ScoreSeriesKey) {
+        setVisible((prev) => {
+            const next = new Set(prev);
+            if (next.has(key)) {
+                if (next.size > 1) next.delete(key);
+            } else {
+                next.add(key);
+            }
+            return next;
+        });
+    }
 
     if (mobileHistory.length === 0 && desktopHistory.length === 0) {
         return (
@@ -313,9 +404,8 @@ function ScoreTrendChart({
 
     return (
         <div className="space-y-3">
-            {/* Mobile / Desktop toggle for the chart */}
-            <div className="flex items-center gap-3">
-                <span className="text-xs text-zinc-500">Showing:</span>
+            {/* Controls row: strategy toggle + series pills */}
+            <div className="flex flex-wrap items-center gap-3">
                 <div className="flex rounded-lg border border-zinc-200 bg-white text-xs font-medium overflow-hidden">
                     {(['mobile', 'desktop'] as const).map((s) => (
                         <button
@@ -332,6 +422,31 @@ function ScoreTrendChart({
                         </button>
                     ))}
                 </div>
+
+                <div className="flex flex-wrap gap-1.5">
+                    {SCORE_SERIES.map((s) => {
+                        const on = visible.has(s.key);
+                        return (
+                            <button
+                                key={s.key}
+                                onClick={() => toggleSeries(s.key)}
+                                className={cn(
+                                    'flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors',
+                                    on
+                                        ? 'text-white'
+                                        : 'border-zinc-200 bg-white text-zinc-400 hover:text-zinc-600',
+                                )}
+                                style={on ? { backgroundColor: s.color, borderColor: s.color } : undefined}
+                            >
+                                <span
+                                    className="h-1.5 w-1.5 rounded-full flex-shrink-0"
+                                    style={{ backgroundColor: on ? 'rgba(255,255,255,0.7)' : s.color }}
+                                />
+                                {s.label}
+                            </button>
+                        );
+                    })}
+                </div>
             </div>
 
             {data.length === 0 ? (
@@ -341,6 +456,11 @@ function ScoreTrendChart({
             ) : (
                 <ResponsiveContainer width="100%" height={220}>
                     <LineChart data={data} margin={{ top: 4, right: 16, bottom: 0, left: 0 }}>
+                        {/* PSI threshold bands: good ≥90, needs improvement 50-89, poor <50 */}
+                        <ReferenceArea y1={90} y2={100} fill="#16a34a" fillOpacity={0.04} ifOverflow="hidden" />
+                        <ReferenceArea y1={50} y2={90}  fill="#d97706" fillOpacity={0.04} ifOverflow="hidden" />
+                        <ReferenceArea y1={0}  y2={50}  fill="#dc2626" fillOpacity={0.04} ifOverflow="hidden" />
+
                         <CartesianGrid strokeDasharray="3 3" stroke="#f4f4f5" />
                         <XAxis
                             dataKey="date"
@@ -352,7 +472,7 @@ function ScoreTrendChart({
                         <RechartTooltip
                             contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e4e4e7' }}
                             labelFormatter={(v) => fmtDate(String(v))}
-                            formatter={(value: unknown) => [`${value} / 100`]}
+                            formatter={(value: unknown, name: unknown) => [`${value} / 100`, name as string]}
                         />
 
                         {holidays.map((h) => (
@@ -367,10 +487,245 @@ function ScoreTrendChart({
                             );
                         })}
 
-                        <Line type="monotone" dataKey="performance_score"    stroke="var(--chart-1)" strokeWidth={2} dot={false} connectNulls={false} name="Performance" />
-                        <Line type="monotone" dataKey="seo_score"            stroke="var(--chart-2)" strokeWidth={2} dot={false} connectNulls={false} name="SEO" />
-                        <Line type="monotone" dataKey="accessibility_score"  stroke="var(--chart-3)" strokeWidth={2} dot={false} connectNulls={false} name="Accessibility" />
-                        <Line type="monotone" dataKey="best_practices_score" stroke="var(--chart-4)" strokeWidth={2} dot={false} connectNulls={false} name="Best Practices" />
+                        {SCORE_SERIES.filter((s) => visible.has(s.key)).map((s) => (
+                            <Line
+                                key={s.key}
+                                type="monotone"
+                                dataKey={s.key}
+                                stroke={s.color}
+                                strokeWidth={2}
+                                dot={false}
+                                connectNulls={false}
+                                name={s.label}
+                            />
+                        ))}
+                    </LineChart>
+                </ResponsiveContainer>
+            )}
+        </div>
+    );
+}
+
+// ─── CWV trend chart ──────────────────────────────────────────────────────────
+
+type CwvMetricKey = 'lcp' | 'inp' | 'cls';
+
+// Maps each metric to its CrUX (field) and lab data keys in HistoryPoint.
+// CrUX is the primary series (real users, p75); lab is the secondary synthetic estimate.
+const CWV_METRICS = [
+    {
+        key:        'lcp' as CwvMetricKey,
+        label:      'LCP',
+        unit:       'ms',
+        cruxKey:    'crux_lcp_p75_ms' as keyof HistoryPoint,
+        labKey:     'lcp_ms'          as keyof HistoryPoint,
+        domain:     [0, 'auto'] as [number, 'auto'],
+        // Threshold bands per Google CWV thresholds
+        bands: [
+            { y1: 0,    y2: 2500,  fill: '#16a34a' },
+            { y1: 2500, y2: 4000,  fill: '#d97706' },
+            { y1: 4000, y2: 12000, fill: '#dc2626' },
+        ],
+        fmt:  (v: number) => fmtMs(v),
+        yFmt: (v: number) => v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${v}`,
+    },
+    {
+        key:        'inp' as CwvMetricKey,
+        label:      'INP',
+        unit:       'ms',
+        cruxKey:    'crux_inp_p75_ms' as keyof HistoryPoint,
+        labKey:     'inp_ms'          as keyof HistoryPoint,
+        domain:     [0, 'auto'] as [number, 'auto'],
+        bands: [
+            { y1: 0,   y2: 200,  fill: '#16a34a' },
+            { y1: 200, y2: 500,  fill: '#d97706' },
+            { y1: 500, y2: 2000, fill: '#dc2626' },
+        ],
+        fmt:  (v: number) => fmtMs(v),
+        yFmt: (v: number) => `${v}ms`,
+    },
+    {
+        key:        'cls' as CwvMetricKey,
+        label:      'CLS',
+        unit:       'score',
+        cruxKey:    'crux_cls_p75' as keyof HistoryPoint,
+        labKey:     'cls_score'    as keyof HistoryPoint,
+        // Fixed domain — auto-scale on a healthy site (CLS ≈ 0.03) would compress the
+        // axis so far that all three threshold bands sit above the visible area.
+        domain:     [0, 0.5] as [number, number],
+        bands: [
+            { y1: 0,    y2: 0.1,  fill: '#16a34a' },
+            { y1: 0.1,  y2: 0.25, fill: '#d97706' },
+            { y1: 0.25, y2: 0.5,  fill: '#dc2626' },
+        ],
+        fmt:  (v: number) => v.toFixed(3),
+        yFmt: (v: number) => v.toFixed(2),
+    },
+] as const;
+
+function CwvTrendChart({
+    mobileHistory,
+    desktopHistory,
+}: {
+    mobileHistory: HistoryPoint[];
+    desktopHistory: HistoryPoint[];
+}) {
+    const [strategy, setStrategy] = useState<ChartStrategy>('mobile');
+    const [metric, setMetric]     = useState<CwvMetricKey>('lcp');
+    const data = strategy === 'mobile' ? mobileHistory : desktopHistory;
+    const cfg  = CWV_METRICS.find((m) => m.key === metric)!;
+
+    // Detect whether this dataset has any CrUX field data at all.
+    const hasCrux = data.some((p) => p[cfg.cruxKey] != null);
+    const [showField, setShowField] = useState(true);
+    const [showLab,   setShowLab]   = useState(false);
+
+    // When metric changes, re-default: prefer field if available.
+    const effectiveShowField = hasCrux && showField;
+    const effectiveShowLab   = !hasCrux || showLab;   // always show lab when no CrUX
+
+    if (mobileHistory.length === 0 && desktopHistory.length === 0) {
+        return (
+            <div className="flex h-48 items-center justify-center text-sm text-zinc-400">
+                No history data for the selected date range.
+            </div>
+        );
+    }
+
+    const tooltipFormatter = (value: unknown, name: unknown) => {
+        const label = name === cfg.cruxKey ? `${cfg.label} (field p75)` : `${cfg.label} (lab)`;
+        return [cfg.fmt(Number(value)), label];
+    };
+
+    return (
+        <div className="space-y-3">
+            {/* Controls row */}
+            <div className="flex flex-wrap items-center gap-3">
+                {/* Strategy toggle */}
+                <div className="flex rounded-lg border border-zinc-200 bg-white text-xs font-medium overflow-hidden">
+                    {(['mobile', 'desktop'] as const).map((s) => (
+                        <button
+                            key={s}
+                            onClick={() => setStrategy(s)}
+                            className={cn(
+                                'px-3 py-1.5 capitalize transition-colors',
+                                strategy === s ? 'bg-zinc-800 text-white' : 'text-zinc-500 hover:bg-zinc-50',
+                            )}
+                        >
+                            {s}
+                        </button>
+                    ))}
+                </div>
+
+                {/* Metric tabs */}
+                <div className="flex gap-1.5">
+                    {CWV_METRICS.map((m) => (
+                        <button
+                            key={m.key}
+                            onClick={() => setMetric(m.key)}
+                            className={cn(
+                                'rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors',
+                                metric === m.key
+                                    ? 'bg-zinc-800 text-white border-zinc-800'
+                                    : 'border-zinc-200 bg-white text-zinc-400 hover:text-zinc-600',
+                            )}
+                        >
+                            {m.label}
+                        </button>
+                    ))}
+                </div>
+
+                {/* Series toggles — Field and Lab */}
+                <div className="flex gap-1.5 ml-auto">
+                    {hasCrux && (
+                        <button
+                            onClick={() => setShowField((v) => !v)}
+                            className={cn(
+                                'flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors',
+                                effectiveShowField
+                                    ? 'border-emerald-400 bg-emerald-500 text-white'
+                                    : 'border-zinc-200 bg-white text-zinc-400 hover:text-zinc-600',
+                            )}
+                        >
+                            <span className="h-1.5 w-1.5 rounded-full flex-shrink-0"
+                                style={{ backgroundColor: effectiveShowField ? 'rgba(255,255,255,0.7)' : '#10b981' }} />
+                            Field p75
+                        </button>
+                    )}
+                    <button
+                        onClick={() => setShowLab((v) => !v)}
+                        className={cn(
+                            'flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors',
+                            effectiveShowLab
+                                ? 'border-zinc-600 bg-zinc-700 text-white'
+                                : 'border-zinc-200 bg-white text-zinc-400 hover:text-zinc-600',
+                        )}
+                    >
+                        <span className="h-1.5 w-1.5 rounded-full flex-shrink-0"
+                            style={{ backgroundColor: effectiveShowLab ? 'rgba(255,255,255,0.7)' : '#71717a' }} />
+                        Lab
+                    </button>
+                </div>
+            </div>
+
+            {data.length === 0 ? (
+                <div className="flex h-36 items-center justify-center text-sm text-zinc-400">
+                    No {strategy} history in this date range.
+                </div>
+            ) : (
+                <ResponsiveContainer width="100%" height={220}>
+                    <LineChart data={data} margin={{ top: 4, right: 16, bottom: 0, left: 8 }}>
+                        {cfg.bands.map((b) => (
+                            <ReferenceArea
+                                key={`${b.y1}-${b.y2}`}
+                                y1={b.y1}
+                                y2={b.y2}
+                                fill={b.fill}
+                                fillOpacity={0.05}
+                                ifOverflow="hidden"
+                            />
+                        ))}
+                        <CartesianGrid strokeDasharray="3 3" stroke="#f4f4f5" />
+                        <XAxis
+                            dataKey="date"
+                            tick={{ fontSize: 11, fill: '#a1a1aa' }}
+                            tickFormatter={fmtDate}
+                            minTickGap={40}
+                        />
+                        <YAxis
+                            domain={cfg.domain}
+                            tickFormatter={cfg.yFmt}
+                            tick={{ fontSize: 11, fill: '#a1a1aa' }}
+                            width={48}
+                        />
+                        <RechartTooltip
+                            contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e4e4e7' }}
+                            labelFormatter={(v) => fmtDate(String(v))}
+                            formatter={tooltipFormatter}
+                        />
+                        {effectiveShowField && hasCrux && (
+                            <Line
+                                type="monotone"
+                                dataKey={cfg.cruxKey}
+                                stroke="#10b981"
+                                strokeWidth={2}
+                                dot={false}
+                                connectNulls={false}
+                                name={cfg.cruxKey}
+                            />
+                        )}
+                        {effectiveShowLab && (
+                            <Line
+                                type="monotone"
+                                dataKey={cfg.labKey}
+                                stroke="#71717a"
+                                strokeWidth={1.5}
+                                strokeDasharray="4 2"
+                                dot={false}
+                                connectNulls={false}
+                                name={cfg.labKey}
+                            />
+                        )}
                     </LineChart>
                 </ResponsiveContainer>
             )}
@@ -392,11 +747,13 @@ function UrlSelector({
     selectedId,
     from,
     to,
+    navigate,
 }: {
     storeUrls: StoreUrlItem[];
     selectedId: number | null;
     from: string;
     to: string;
+    navigate: (params: Record<string, string | number | undefined>) => void;
 }) {
     const [open, setOpen] = useState(false);
     const selected = storeUrls.find((u) => u.id === selectedId);
@@ -407,7 +764,7 @@ function UrlSelector({
         <div className="relative">
             <button
                 onClick={() => setOpen((v) => !v)}
-                className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 shadow-sm hover:bg-zinc-50"
+                className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
             >
                 <span className="max-w-[240px] truncate">
                     {selected?.label ?? selected?.url ?? 'Select URL'}
@@ -452,21 +809,28 @@ export default function PerformancePage({
     desktop_latest,
     mobile_history,
     desktop_history,
+    mobile_score_delta,
+    desktop_score_delta,
     url_summary,
     holiday_overlays,
     workspace_event_overlays,
     from,
     to,
 }: Props) {
+    const { workspace } = usePage<PageProps>().props;
     const selectedUrl = store_urls.find((u) => u.id === selected_url_id);
     const hasAnyData  = mobile_latest !== null || desktop_latest !== null;
+
+    function navigate(params: Record<string, string | number | undefined>) {
+        router.get(wurl(workspace?.slug, '/performance'), params as Record<string, string>, { preserveState: true, replace: true });
+    }
 
     // ── Empty state — no store connected ─────────────────────────────────────
     if (store_urls.length === 0) {
         return (
             <AppLayout>
                 <Head title="Site Performance" />
-                <div className="mx-auto max-w-5xl px-6 py-10 space-y-6">
+                <div className="space-y-6">
                     <PageHeader title="Site Performance" />
                     <div className="rounded-2xl border border-zinc-200 bg-white p-10 text-center">
                         <div className="text-zinc-400 text-sm">
@@ -479,18 +843,22 @@ export default function PerformancePage({
     }
 
     return (
-        <AppLayout>
+        <AppLayout dateRangePicker={<DateRangePicker />}>
             <Head title="Site Performance" />
-            <div className="mx-auto max-w-5xl px-6 py-10 space-y-8">
-
-                {/* Header + controls */}
-                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-                    <PageHeader title="Site Performance" subtitle={selectedUrl?.url} />
-                    <div className="flex flex-wrap items-center gap-3">
-                        <UrlSelector storeUrls={store_urls} selectedId={selected_url_id} from={from} to={to} />
-                        <DateRangePicker />
-                    </div>
-                </div>
+            <div className="space-y-8">
+                <PageHeader
+                    title="Site Performance"
+                    subtitle={selectedUrl?.label ? selectedUrl.url : undefined}
+                    action={
+                        <UrlSelector
+                            storeUrls={store_urls}
+                            selectedId={selected_url_id}
+                            from={from}
+                            to={to}
+                            navigate={navigate}
+                        />
+                    }
+                />
 
                 {/* No data yet */}
                 {!hasAnyData ? (
@@ -511,20 +879,20 @@ export default function PerformancePage({
                     <>
                         {/* Mobile + Desktop columns */}
                         <section className="space-y-3">
-                            <h2 className="text-sm font-semibold text-zinc-500 uppercase tracking-wide">
+                            <h2 className="section-label">
                                 Lighthouse Scores &amp; Core Web Vitals
                             </h2>
                             <div className="flex gap-6">
-                                <StrategyColumn label="Mobile"  scores={mobile_latest} />
+                                <StrategyColumn label="Mobile"  scores={mobile_latest}  delta={mobile_score_delta} />
                                 <div className="w-px bg-zinc-100 self-stretch" />
-                                <StrategyColumn label="Desktop" scores={desktop_latest} />
+                                <StrategyColumn label="Desktop" scores={desktop_latest} delta={desktop_score_delta} />
                             </div>
                         </section>
 
                         {/* Score trend chart */}
                         {(mobile_history.length > 0 || desktop_history.length > 0) && (
                             <section className="rounded-2xl border border-zinc-200 bg-white p-6 space-y-4">
-                                <h2 className="text-sm font-semibold text-zinc-500 uppercase tracking-wide">
+                                <h2 className="section-label">
                                     Score Trend
                                 </h2>
                                 <ScoreTrendChart
@@ -551,13 +919,35 @@ export default function PerformancePage({
                                 )}
                             </section>
                         )}
+
+                        {/* CWV trend chart */}
+                        {(mobile_history.length > 0 || desktop_history.length > 0) && (() => {
+                            const allHistory = [...mobile_history, ...desktop_history];
+                            const hasCrux = allHistory.some(
+                                (p) => p.crux_lcp_p75_ms != null || p.crux_inp_p75_ms != null || p.crux_cls_p75 != null
+                            );
+                            return (
+                                <section className="rounded-2xl border border-zinc-200 bg-white p-6 space-y-4">
+                                    <h2 className="section-label">Core Web Vitals Trend</h2>
+                                    <CwvTrendChart
+                                        mobileHistory={mobile_history}
+                                        desktopHistory={desktop_history}
+                                    />
+                                    <p className="text-xs text-zinc-400">
+                                        {hasCrux
+                                            ? 'Field data (p75) from Chrome User Experience Report — real users. Lab data from PageSpeed Insights shown as reference.'
+                                            : 'No real-user (CrUX) field data available for this URL yet — showing PageSpeed Insights lab estimates only.'}
+                                    </p>
+                                </section>
+                            );
+                        })()}
                     </>
                 )}
 
                 {/* URL summary table */}
                 {url_summary.length > 1 && (
                     <section className="space-y-3">
-                        <h2 className="text-sm font-semibold text-zinc-500 uppercase tracking-wide">
+                        <h2 className="section-label">
                             All Monitored URLs
                         </h2>
                         <div className="rounded-2xl border border-zinc-200 bg-white overflow-hidden">
@@ -565,7 +955,7 @@ export default function PerformancePage({
                                 <thead>
                                     <tr className="border-b border-zinc-100 bg-zinc-50 text-left">
                                         <th className="px-5 py-3 font-medium text-zinc-500">URL</th>
-                                        <th className="px-4 py-3 font-medium text-zinc-500 text-center" colSpan={2}>Mobile</th>
+                                        <th className="px-4 py-3 font-medium text-zinc-500 text-center" colSpan={3}>Mobile</th>
                                         <th className="px-4 py-3 font-medium text-zinc-500 text-center" colSpan={2}>Desktop</th>
                                         <th className="px-4 py-3 font-medium text-zinc-500 text-right">Checked</th>
                                     </tr>
@@ -573,6 +963,7 @@ export default function PerformancePage({
                                         <th />
                                         <th className="px-4 pb-2 text-xs font-normal text-zinc-400 text-center">Perf</th>
                                         <th className="px-4 pb-2 text-xs font-normal text-zinc-400 text-center">LCP</th>
+                                        <th className="px-4 pb-2 text-xs font-normal text-zinc-400 text-center">INP</th>
                                         <th className="px-4 pb-2 text-xs font-normal text-zinc-400 text-center">Perf</th>
                                         <th className="px-4 pb-2 text-xs font-normal text-zinc-400 text-center">LCP</th>
                                         <th />
@@ -596,6 +987,11 @@ export default function PerformancePage({
                                             </td>
                                             <td className="px-4 py-3 text-center"><ScoreBadge score={row.mobile_performance_score} /></td>
                                             <td className="px-4 py-3 text-center text-zinc-600 tabular-nums text-xs">{fmtMs(row.mobile_lcp_ms)}</td>
+                                            <td className="px-4 py-3 text-center">
+                                                <span className={cn('rounded px-1.5 py-0.5 text-xs font-medium tabular-nums', cwvBadgeClass(inpGrade(row.mobile_inp_ms)))}>
+                                                    {fmtMs(row.mobile_inp_ms)}
+                                                </span>
+                                            </td>
                                             <td className="px-4 py-3 text-center"><ScoreBadge score={row.desktop_performance_score} /></td>
                                             <td className="px-4 py-3 text-center text-zinc-600 tabular-nums text-xs">{fmtMs(row.desktop_lcp_ms)}</td>
                                             <td className="px-4 py-3 text-right text-zinc-400 text-xs">

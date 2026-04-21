@@ -14,8 +14,12 @@ use Symfony\Component\HttpFoundation\Response;
 class SetActiveWorkspace
 {
     // Paths where we skip setting workspace context entirely (no auth context needed).
+    // 'workspaces' covers POST /workspaces (create), DELETE /workspaces/{id} (discard),
+    // and POST /workspaces/{id}/switch — these routes manage workspace context themselves
+    // and pass an integer ID in the route parameter, not a slug.
     private const SKIP_PATHS = [
         'onboarding',
+        'workspaces',
         'login',
         'register',
         'verify-email',
@@ -41,22 +45,38 @@ class SetActiveWorkspace
         $user = $request->user();
 
         // --- Route-based resolution (workspace-prefixed routes) ---
-        // When the URL starts with /{workspace:slug}/, Laravel's implicit binding
-        // resolves the Workspace model before middleware runs. Use it directly.
+        // This middleware runs before SubstituteBindings, so the {workspace:slug}
+        // route parameter arrives as a raw slug string rather than a bound model.
+        // We resolve the workspace ourselves so WorkspaceContext is set before
+        // SubstituteBindings triggers WorkspaceScope on any other route models.
         $routeWorkspace = $request->route('workspace');
-        if ($routeWorkspace instanceof Workspace) {
+        if ($routeWorkspace instanceof Workspace || (is_string($routeWorkspace) && !is_numeric($routeWorkspace))) {
+            $workspace = $routeWorkspace instanceof Workspace
+                ? $routeWorkspace
+                : Workspace::where('slug', $routeWorkspace)->whereNull('deleted_at')->first();
+
+            if (! $workspace) {
+                abort(404);
+            }
+
             $isMember = WorkspaceUser::where('user_id', $user->id)
-                ->where('workspace_id', $routeWorkspace->id)
-                ->whereHas('workspace', fn ($q) => $q->whereNull('deleted_at'))
+                ->where('workspace_id', $workspace->id)
                 ->exists();
 
             if (! $isMember) {
-                abort(403, 'You do not have access to this workspace.');
+                // Redirect rather than abort so we don't reveal whether the workspace
+                // exists or leak it to non-members. Send them to their own dashboard.
+                return redirect('/onboarding');
             }
 
-            app(WorkspaceContext::class)->set($routeWorkspace->id);
+            app(WorkspaceContext::class)->set($workspace->id, $workspace->slug);
             // Keep session in sync so the workspace switcher reflects the URL.
-            session(['active_workspace_id' => $routeWorkspace->id]);
+            session(['active_workspace_id' => $workspace->id]);
+
+            // Remove the workspace parameter so it doesn't leak into controller
+            // method arguments as a positional value (Laravel resolves remaining
+            // route parameters positionally via array_values()).
+            $request->route()->forgetParameter('workspace');
 
             return $next($request);
         }
@@ -74,7 +94,8 @@ class SetActiveWorkspace
             return redirect('/onboarding');
         }
 
-        app(WorkspaceContext::class)->set($workspaceId);
+        $slug = Workspace::where('id', $workspaceId)->value('slug');
+        app(WorkspaceContext::class)->set($workspaceId, $slug);
 
         return $next($request);
     }

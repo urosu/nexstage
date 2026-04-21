@@ -6,6 +6,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Store;
 use App\Models\SyncLog;
+use App\Models\Workspace;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -34,11 +35,11 @@ use Illuminate\Http\Request;
  */
 class ImportStatusController extends Controller
 {
-    public function __invoke(Request $request, string $slug): JsonResponse
+    public function __invoke(Request $request, string $storeSlug): JsonResponse
     {
         // WorkspaceScope is active (set by SetActiveWorkspace middleware).
         // A 404 here means the store does not belong to the active workspace.
-        $store = Store::where('slug', $slug)->first();
+        $store = Store::where('slug', $storeSlug)->first();
 
         if ($store === null) {
             return response()->json(['error' => 'Store not found.'], 404);

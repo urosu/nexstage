@@ -1,6 +1,14 @@
-import axios from 'axios';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Head, Link, router, usePage } from '@inertiajs/react';
+
+// Why: When Inertia swaps components via flushSync mid-navigation, the new component
+// initialises with useState(false) and renders stale cached data before the real server
+// response arrives. Tracking navigation state at module level lets us start with
+// navigating=true so the skeleton stays visible until the real data is ready.
+let _inertiaNavigating = false;
+router.on('start',  () => { _inertiaNavigating = true; });
+router.on('finish', () => { _inertiaNavigating = false; });
+
 import { BarChart2, Table2, Grid2X2 } from 'lucide-react';
 import AppLayout from '@/Components/layouts/AppLayout';
 import { DateRangePicker } from '@/Components/shared/DateRangePicker';
@@ -8,11 +16,25 @@ import { PageHeader } from '@/Components/shared/PageHeader';
 import { MetricCard } from '@/Components/shared/MetricCard';
 import { CampaignsTabBar } from '@/Components/shared/CampaignsTabBar';
 import { StatusBadge } from '@/Components/shared/StatusBadge';
-import { BarChart, type BarSeriesConfig } from '@/Components/charts/BarChart';
+import { SortButton } from '@/Components/shared/SortButton';
+import { PlatformBadge } from '@/Components/shared/PlatformBadge';
+import { ToggleGroup } from '@/Components/shared/ToggleGroup';
+import { WlFilterBar, classifierTooltip } from '@/Components/shared/WlFilterBar';
+import type { WlClassifier, WlFilter } from '@/Components/shared/WlFilterBar';
+import {
+    LineChart as RechartsLineChart,
+    Line,
+    XAxis,
+    YAxis,
+    CartesianGrid,
+    Tooltip as RechartsTooltip,
+    ResponsiveContainer,
+} from 'recharts';
 import { QuadrantChart, type QuadrantCampaign } from '@/Components/charts/QuadrantChart';
-import { formatCurrency, formatNumber, type Granularity } from '@/lib/formatters';
+import { formatCurrency, formatDate, formatNumber, type Granularity } from '@/lib/formatters';
 import { cn } from '@/lib/utils';
 import { syncDotClass, syncDotTitle } from '@/lib/syncStatus';
+import { wurl } from '@/lib/workspace-url';
 import type { PageProps } from '@/types';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -24,6 +46,8 @@ interface CampaignMetrics {
     revenue: number | null;
     attributed_revenue: number | null;
     attributed_orders: number;
+    real_roas: number | null;
+    real_cpo: number | null;
     impressions: number;
     clicks: number;
     ctr: number | null;
@@ -46,6 +70,8 @@ interface CampaignRow {
     attributed_revenue: number | null;
     attributed_orders: number;
     spend_velocity: number | null;
+    target_roas: number | null;
+    wl_tag: 'winner' | 'loser' | null;
 }
 
 interface PlatformBreakdownEntry {
@@ -76,13 +102,20 @@ interface Props {
     metrics: CampaignMetrics | null;
     compare_metrics: CampaignMetrics | null;
     campaigns: CampaignRow[];
+    campaigns_total_count: number;
     platform_breakdown: Record<string, PlatformBreakdownEntry>;
     chart_data: SpendChartPoint[];
     compare_chart_data: SpendChartPoint[] | null;
     total_revenue: number | null;
     unattributed_revenue: number | null;
-    // Workspace ROAS target for Winners/Losers chips. Null = no target set.
+    not_tracked_pct: number | null;
     workspace_target_roas: number | null;
+    // W/L classifier props from server
+    wl_has_target: boolean;
+    active_classifier: 'target' | 'peer' | 'period';
+    wl_peer_avg_roas: number | null;
+    filter: WlFilter;
+    classifier: WlClassifier | null;
     from: string;
     to: string;
     compare_from: string | null;
@@ -102,85 +135,6 @@ function pctChange(current: number | null, previous: number | null): number | nu
     return ((current - previous) / previous) * 100;
 }
 
-function navigate(params: Record<string, string | undefined>) {
-    router.get('/campaigns', params as Record<string, string>, { preserveState: true, replace: true });
-}
-
-// ─── Toggle button group ──────────────────────────────────────────────────────
-
-function ToggleGroup<T extends string>({
-    options,
-    value,
-    onChange,
-}: {
-    options: { label: string; value: T }[];
-    value: T;
-    onChange: (v: T) => void;
-}) {
-    return (
-        <div className="inline-flex rounded-lg border border-zinc-200 bg-zinc-50 p-0.5">
-            {options.map((opt) => (
-                <button
-                    key={opt.value}
-                    onClick={() => onChange(opt.value)}
-                    className={cn(
-                        'rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
-                        value === opt.value
-                            ? 'bg-white text-zinc-900 shadow-sm'
-                            : 'text-zinc-500 hover:text-zinc-700',
-                    )}
-                >
-                    {opt.label}
-                </button>
-            ))}
-        </div>
-    );
-}
-
-// ─── Platform badge ───────────────────────────────────────────────────────────
-
-const PLATFORM_COLORS: Record<string, string> = {
-    facebook: 'bg-blue-50 text-blue-700',
-    google:   'bg-red-50 text-red-700',
-};
-
-function PlatformBadge({ platform }: { platform: string }) {
-    return (
-        <span className={cn(
-            'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium capitalize',
-            PLATFORM_COLORS[platform] ?? 'bg-zinc-100 text-zinc-500',
-        )}>
-            {platform}
-        </span>
-    );
-}
-
-// ─── Sort button ──────────────────────────────────────────────────────────────
-
-function SortButton({
-    col,
-    label,
-    currentSort,
-    currentDir,
-    onSort,
-}: {
-    col: string;
-    label: string;
-    currentSort: string;
-    currentDir: 'asc' | 'desc';
-    onSort: (col: string) => void;
-}) {
-    const active = currentSort === col;
-    return (
-        <button
-            onClick={() => onSort(col)}
-            className={cn('flex items-center gap-1 hover:text-zinc-700 transition-colors', active ? 'text-primary' : 'text-zinc-400')}
-        >
-            {label}
-            {active && <span className="text-[10px]">{currentDir === 'desc' ? '↓' : '↑'}</span>}
-        </button>
-    );
-}
 
 // ─── Spend velocity badge ─────────────────────────────────────────────────────
 // velocity = (spend / budget_for_period) / (days_elapsed / days_in_period)
@@ -201,11 +155,12 @@ function SpendVelocityBadge({ velocity }: { velocity: number | null }) {
     );
 }
 
-// ─── Spend chart (multi-platform stacked) ────────────────────────────────────
 
-const SPEND_SERIES: BarSeriesConfig[] = [
-    { dataKey: 'facebook', name: 'Facebook', color: '#3b82f6', stackId: 'spend' },
-    { dataKey: 'google',   name: 'Google',   color: '#ef4444', stackId: 'spend' },
+// ─── Spend chart (multi-platform lines) ──────────────────────────────────────
+
+const SPEND_PLATFORMS = [
+    { dataKey: 'facebook' as const, name: 'Facebook', color: 'var(--chart-1)' },
+    { dataKey: 'google'   as const, name: 'Google',   color: 'var(--chart-4)' },
 ];
 
 function SpendChart({
@@ -219,28 +174,105 @@ function SpendChart({
     currency: string;
     navigating: boolean;
 }) {
-    const activeSeries = useMemo(
-        () => SPEND_SERIES.filter((s) => chartData.some((d) => (d[s.dataKey as keyof SpendChartPoint] as number) > 0)),
+    const activePlatforms = useMemo(
+        () => SPEND_PLATFORMS.filter((p) => chartData.some((d) => (d[p.dataKey] ?? 0) > 0)),
         [chartData],
     );
 
+    const [visible, setVisible] = useState<Set<string>>(() => new Set(activePlatforms.map((p) => p.dataKey)));
+
+    useEffect(() => {
+        setVisible(new Set(activePlatforms.map((p) => p.dataKey)));
+    }, [activePlatforms.map((p) => p.dataKey).join(',')]);
+
+    function toggle(key: string) {
+        setVisible((prev) => {
+            const next = new Set(prev);
+            if (next.has(key)) {
+                if (next.size === 1) return prev;
+                next.delete(key);
+            } else {
+                next.add(key);
+            }
+            return next;
+        });
+    }
+
     return (
         <div className="mb-6 rounded-xl border border-zinc-200 bg-white p-5">
-            <div className="mb-4 text-sm font-medium text-zinc-500">Daily ad spend</div>
-            {chartData.length === 0 ? (
+            <div className="mb-1 text-sm font-medium text-zinc-500">Daily ad spend</div>
+            {navigating ? (
+                <div className="h-64 w-full animate-pulse rounded-lg bg-zinc-100" />
+            ) : chartData.length === 0 ? (
                 <div className="flex h-64 flex-col items-center justify-center gap-2">
                     <p className="text-sm text-zinc-400">No spend data for this period.</p>
                 </div>
             ) : (
-                <BarChart
-                    data={chartData}
-                    granularity={granularity}
-                    currency={currency}
-                    valueType="currency"
-                    series={activeSeries}
-                    loading={navigating}
-                    className="h-64 w-full"
-                />
+                <>
+                    {activePlatforms.length > 1 && (
+                        <div className="mb-3 flex flex-wrap gap-1.5">
+                            {activePlatforms.map((p) => {
+                                const on = visible.has(p.dataKey);
+                                return (
+                                    <button
+                                        key={p.dataKey}
+                                        onClick={() => toggle(p.dataKey)}
+                                        className={cn(
+                                            'flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors',
+                                            !on && 'border-zinc-200 bg-white text-zinc-400 hover:text-zinc-600',
+                                        )}
+                                        style={on ? { backgroundColor: p.color, borderColor: p.color, color: 'white' } : undefined}
+                                    >
+                                        <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: on ? 'white' : p.color }} />
+                                        {p.name}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    )}
+                    <ResponsiveContainer width="100%" height={240}>
+                        <RechartsLineChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#f4f4f5" vertical={false} />
+                            <XAxis
+                                dataKey="date"
+                                tick={{ fontSize: 11, fill: '#a1a1aa' }}
+                                tickFormatter={(d) => formatDate(d, granularity)}
+                                tickLine={false}
+                                axisLine={false}
+                                minTickGap={40}
+                            />
+                            <YAxis
+                                tick={{ fontSize: 11, fill: '#a1a1aa' }}
+                                tickFormatter={(v) => formatCurrency(v, currency, true)}
+                                tickLine={false}
+                                axisLine={false}
+                                width={60}
+                                domain={[0, 'auto']}
+                            />
+                            <RechartsTooltip
+                                contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e4e4e7' }}
+                                formatter={(value: unknown, key: unknown) => {
+                                    const p = SPEND_PLATFORMS.find((s) => s.dataKey === String(key));
+                                    return [formatCurrency(Number(value), currency), p?.name ?? String(key)] as [string, string];
+                                }}
+                                labelFormatter={(label) => formatDate(String(label), granularity)}
+                            />
+                            {activePlatforms.map((p) =>
+                                visible.has(p.dataKey) ? (
+                                    <Line
+                                        key={p.dataKey}
+                                        type="monotone"
+                                        dataKey={p.dataKey}
+                                        stroke={p.color}
+                                        strokeWidth={2}
+                                        dot={false}
+                                        connectNulls
+                                    />
+                                ) : null,
+                            )}
+                        </RechartsLineChart>
+                    </ResponsiveContainer>
+                </>
             )}
         </div>
     );
@@ -256,6 +288,8 @@ function CampaignTable({
     onSort,
     from,
     to,
+    workspaceSlug,
+    targetRoas,
 }: {
     campaigns: CampaignRow[];
     currency: string;
@@ -264,6 +298,8 @@ function CampaignTable({
     onSort: (col: string) => void;
     from: string;
     to: string;
+    workspaceSlug: string | undefined;
+    targetRoas: number | null;
 }) {
     const sortBtn = (col: string, label: string) => (
         <SortButton col={col} label={label} currentSort={sort} currentDir={direction} onSort={onSort} />
@@ -295,7 +331,7 @@ function CampaignTable({
                                 This side-by-side comparison is the primary trust-building moment:
                                 "Facebook says 4.2× / Store says 2.8×" on the same row.
                                 See: PLANNING.md "Platform ROAS vs Real ROAS" */}
-                            <tr className="text-left text-xs font-medium uppercase tracking-wide text-zinc-400">
+                            <tr className="text-left th-label">
                                 <th className="px-5 py-3">Campaign</th>
                                 <th className="px-5 py-3">Platform</th>
                                 <th className="px-5 py-3">Status</th>
@@ -305,7 +341,7 @@ function CampaignTable({
                                 {/* Platform ROAS next to Real ROAS — the visual contrast is the point */}
                                 <th className="px-5 py-3 text-right">
                                     <span className="inline-flex items-center gap-1">
-                                        Platform ROAS
+                                        {sortBtn('platform_roas', 'Platform ROAS')}
                                         <a
                                             href="/help/data-accuracy#roas"
                                             className="text-zinc-300 hover:text-zinc-500 transition-colors"
@@ -329,16 +365,16 @@ function CampaignTable({
                                 <th className="px-5 py-3 text-right">
                                     {sortBtn('attributed_revenue', 'Attr. Revenue')}
                                 </th>
-                                <th className="px-5 py-3 text-right">Attr. Orders</th>
+                                <th className="px-5 py-3 text-right">{sortBtn('attributed_orders', 'Attr. Orders')}</th>
                                 <th className="px-5 py-3 text-right">
                                     <span title="Spend velocity: how fast this campaign is burning through its budget vs expected daily pace. 100% = on pace. Requires a daily or lifetime budget set on the campaign.">
                                         {sortBtn('spend_velocity', 'Velocity')}
                                     </span>
                                 </th>
-                                <th className="px-5 py-3 text-right">Impressions</th>
-                                <th className="px-5 py-3 text-right">Clicks</th>
-                                <th className="px-5 py-3 text-right">CTR</th>
-                                <th className="px-5 py-3 text-right">CPC</th>
+                                <th className="px-5 py-3 text-right">{sortBtn('impressions', 'Impressions')}</th>
+                                <th className="px-5 py-3 text-right">{sortBtn('clicks', 'Clicks')}</th>
+                                <th className="px-5 py-3 text-right">{sortBtn('ctr', 'CTR')}</th>
+                                <th className="px-5 py-3 text-right">{sortBtn('cpc', 'CPC')}</th>
                                 <th className="px-5 py-3 text-right">Drill →</th>
                             </tr>
                         </thead>
@@ -347,7 +383,7 @@ function CampaignTable({
                                 <tr key={c.id} className="hover:bg-zinc-50">
                                     <td className="max-w-[200px] px-5 py-3">
                                         <Link
-                                            href={`/campaigns/adsets?campaign_id=${c.id}&from=${from}&to=${to}`}
+                                            href={wurl(workspaceSlug, `/campaigns/adsets?campaign_id=${c.id}&from=${from}&to=${to}`)}
                                             className="block truncate font-medium text-zinc-800 hover:text-primary transition-colors"
                                             title={c.name}
                                         >
@@ -375,10 +411,10 @@ function CampaignTable({
                                             <span className="text-zinc-400">—</span>
                                         )}
                                     </td>
-                                    {/* Real ROAS — green/red based on ≥1×. Adjacent to Platform ROAS for contrast. */}
+                                    {/* Real ROAS — green/red vs workspace target (same threshold as the MetricCard above). */}
                                     <td className="px-5 py-3 text-right tabular-nums font-medium">
                                         {c.real_roas != null ? (
-                                            <span className={c.real_roas >= 1 ? 'text-green-700' : 'text-red-600'}>
+                                            <span className={c.real_roas >= (targetRoas ?? 1) ? 'text-green-700' : 'text-red-600'}>
                                                 {c.real_roas.toFixed(2)}×
                                             </span>
                                         ) : (
@@ -411,7 +447,7 @@ function CampaignTable({
                                     </td>
                                     <td className="px-5 py-3 text-right">
                                         <Link
-                                            href={`/campaigns/adsets?campaign_id=${c.id}&from=${from}&to=${to}`}
+                                            href={wurl(workspaceSlug, `/campaigns/adsets?campaign_id=${c.id}&from=${from}&to=${to}`)}
                                             className="text-xs text-zinc-400 hover:text-primary transition-colors"
                                             title="View ad sets for this campaign"
                                         >
@@ -434,6 +470,10 @@ export default function CampaignsIndex(props: Props) {
     const { workspace, auth } = usePage<PageProps>().props;
     const currency = workspace?.reporting_currency ?? 'EUR';
 
+    function navigate(params: Record<string, string | undefined>) {
+        router.get(wurl(workspace?.slug, '/campaigns'), params as Record<string, string>, { preserveState: true, replace: true });
+    }
+
     const {
         has_ad_accounts,
         ad_accounts,
@@ -441,10 +481,17 @@ export default function CampaignsIndex(props: Props) {
         metrics,
         compare_metrics,
         campaigns,
+        campaigns_total_count,
         chart_data,
         total_revenue,
         unattributed_revenue,
+        not_tracked_pct,
         workspace_target_roas,
+        wl_has_target,
+        active_classifier,
+        wl_peer_avg_roas,
+        filter,
+        classifier,
         from,
         to,
         compare_from,
@@ -457,46 +504,11 @@ export default function CampaignsIndex(props: Props) {
         direction,
     } = props;
 
-    const [navigating, setNavigating] = useState(false);
+    const [navigating, setNavigating] = useState(() => _inertiaNavigating);
 
     // ── Quadrant ROAS type toggle — local state, no server round-trip needed ──
     // Both real_roas and platform_roas are already in the campaign rows.
     const [roasType, setRoasType] = useState<'real' | 'platform'>('real');
-
-    // ── Winners / Losers filter ──────────────────────────────────────────────
-    // Restored from view_preferences on mount; URL ?filter param takes priority
-    // (used by sidebar "Winners / Losers" deep-links). Persisted on change.
-    // Winners = real_roas >= threshold (workspace target or 1.0 break-even fallback).
-    // See: PLANNING.md "Winners/Losers" filter chips
-    const urlFilter = typeof window !== 'undefined'
-        ? (new URLSearchParams(window.location.search).get('filter') ?? null)
-        : null;
-    const savedFilter = (urlFilter ?? auth.user?.view_preferences?.campaigns?.filter ?? 'all') as 'all' | 'winners' | 'losers';
-    const [roasFilter, setRoasFilter] = useState<'all' | 'winners' | 'losers'>(savedFilter);
-    const filterPersistTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-    function setRoasFilterAndPersist(f: 'all' | 'winners' | 'losers') {
-        setRoasFilter(f);
-        if (filterPersistTimeout.current) clearTimeout(filterPersistTimeout.current);
-        filterPersistTimeout.current = setTimeout(() => {
-            axios.patch('/settings/view-preferences', {
-                preferences: { campaigns: { filter: f } },
-            }).catch(() => {});
-        }, 400);
-    }
-
-    // Threshold: workspace target, or 1.0× break-even if no target is set.
-    const roasThreshold = workspace_target_roas ?? 1.0;
-
-    const filteredCampaigns = useMemo(() => {
-        if (roasFilter === 'all') return campaigns;
-        return campaigns.filter(c => {
-            // Zero-spend campaigns are dormant, not losers — exclude from losers filter
-            if (roasFilter === 'losers' && !c.spend) return false;
-            if (c.real_roas === null) return roasFilter === 'losers'; // null ROAS = no attribution = loser
-            return roasFilter === 'winners' ? c.real_roas >= roasThreshold : c.real_roas < roasThreshold;
-        });
-    }, [campaigns, roasFilter, roasThreshold]);
 
     useEffect(() => {
         const off1 = router.on('start',  () => setNavigating(true));
@@ -523,7 +535,9 @@ export default function CampaignsIndex(props: Props) {
         view,
         sort,
         direction,
-    }), [from, to, compare_from, compare_to, ad_account_ids, granularity, platform, status, view, sort, direction]);
+        ...(filter !== 'all'     ? { filter }     : {}),
+        ...(classifier !== null  ? { classifier } : {}),
+    }), [from, to, compare_from, compare_to, ad_account_ids, granularity, platform, status, view, sort, direction, filter, classifier]);
 
     function setPlatform(v: 'all' | 'facebook' | 'google') {
         // Clear ad account filter when switching platforms
@@ -619,7 +633,7 @@ export default function CampaignsIndex(props: Props) {
                                 )}
                                 title={`${a.name} — ${syncDotTitle(a.status, a.last_synced_at)}`}
                             >
-                                <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', syncDotClass(a.status, a.last_synced_at))} />
+                                <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', syncDotClass(a.status, a.last_synced_at, 'ad_account'))} />
                                 {a.name}
                             </button>
                         ))}
@@ -671,83 +685,28 @@ export default function CampaignsIndex(props: Props) {
                     </button>
                 </div>
 
-                {/* Winners / Losers chips — visible in both table and quadrant view.
-                    Real ROAS ≥ target (or ≥ 1× break-even). Persisted to view_preferences. See: PLANNING.md "Winners/Losers" */}
-                <div className="flex items-center gap-1">
-                    {(['all', 'winners', 'losers'] as const).map(f => (
-                        <button
-                            key={f}
-                            onClick={() => setRoasFilterAndPersist(f)}
-                            className={cn(
-                                'rounded-full border px-3 py-1 text-xs font-medium transition-colors',
-                                roasFilter === f
-                                    ? f === 'winners'
-                                        ? 'border-green-300 bg-green-50 text-green-700'
-                                        : f === 'losers'
-                                        ? 'border-red-300 bg-red-50 text-red-700'
-                                        : 'border-primary bg-primary/10 text-primary'
-                                    : 'border-zinc-200 text-zinc-500 hover:border-zinc-300 hover:text-zinc-700',
-                            )}
-                            title={
-                                f === 'winners'
-                                    ? `Real ROAS ≥ ${roasThreshold.toFixed(2)}×`
-                                    : f === 'losers'
-                                    ? `Real ROAS < ${roasThreshold.toFixed(2)}×`
-                                    : 'Show all campaigns'
-                            }
-                        >
-                            {f === 'all' ? 'All' : f === 'winners' ? '🏆 Winners' : '📉 Losers'}
-                        </button>
-                    ))}
-                    {roasFilter !== 'all' && (
-                        <span className="text-xs text-zinc-400">
-                            {filteredCampaigns.length} / {campaigns.length}
-                        </span>
-                    )}
-                </div>
+                {/* Winners / Losers chips — server-side filtered.
+                    Classifier (target/peer/period) determines the threshold.
+                    See: PLANNING.md section 15 (Winners/Losers classifier) */}
+                <WlFilterBar
+                    filter={filter}
+                    totalCount={campaigns_total_count}
+                    filteredCount={campaigns.length}
+                    activeClassifier={active_classifier}
+                    hasTarget={wl_has_target}
+                    targetRoas={workspace_target_roas}
+                    peerAvgRoas={wl_peer_avg_roas}
+                    allLabel="Show all campaigns"
+                    onFilterChange={f => navigate({ ...currentParams, ...(f !== 'all' ? { filter: f } : { filter: undefined }) })}
+                    onClassifierChange={c => navigate({ ...currentParams, classifier: c })}
+                />
             </div>
 
-            {/* ── Revenue context cards (only when store is connected) ── */}
-            {/* Why: these cards give the Platform ROAS vs Real ROAS contrast its context.
-                Without seeing total store revenue next to ad-attributed revenue, the gap is invisible. */}
-            {(total_revenue !== null || unattributed_revenue !== null) && (
-                <div className="mb-4 grid grid-cols-2 gap-4">
-                    <MetricCard
-                        label="Total Store Revenue"
-                        source="store"
-                        value={total_revenue !== null ? formatCurrency(total_revenue, currency) : null}
-                        loading={navigating}
-                        tooltip="Total revenue from your store for the selected period, from daily snapshots."
-                    />
-                    <MetricCard
-                        label="Not Tracked Revenue"
-                        source="real"
-                        value={unattributed_revenue !== null ? formatCurrency(unattributed_revenue, currency) : null}
-                        loading={navigating}
-                        tooltip="Revenue not tracked by any ad platform. Includes organic search, direct, email campaigns (Klaviyo, Mailchimp), affiliates, and any other untagged traffic. When negative, platforms over-reported — usually due to iOS14+ modeled conversions. To see email revenue separately, add utm_medium=email to your email campaigns."
-                    />
-                </div>
-            )}
-
-            {/* ── Metric cards ── */}
+            {/* ── Hero cards — per PLANNING 12.5 /campaigns spec ── */}
             <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
                 <MetricCard
-                    label="Blended ROAS"
-                    value={metrics?.roas != null ? `${metrics.roas.toFixed(2)}×` : null}
-                    change={changes.roas}
-                    loading={navigating}
-                    tooltip="Blended Return On Ad Spend. Total store revenue (from daily snapshots) divided by total ad spend across all platforms. Not limited to UTM-attributed orders — use Real ROAS per campaign for UTM-matched attribution."
-                />
-                <MetricCard
-                    label="CPO"
-                    value={metrics?.cpo != null ? formatCurrency(metrics.cpo, currency) : null}
-                    change={changes.cpo}
-                    invertTrend
-                    loading={navigating}
-                    tooltip="Cost Per Order. Ad spend divided by the number of orders attributed to this platform via UTM tracking. N/A when no orders have matching UTM parameters."
-                />
-                <MetricCard
-                    label="Total Spend"
+                    label="Total Ad Spend"
+                    source="real"
                     value={metrics?.spend != null ? formatCurrency(metrics.spend, currency) : null}
                     change={changes.spend}
                     invertTrend
@@ -755,15 +714,37 @@ export default function CampaignsIndex(props: Props) {
                     tooltip="Total ad spend reported by the platform for the selected period, converted to your reporting currency."
                 />
                 <MetricCard
-                    label="Attributed Revenue"
-                    value={metrics?.attributed_revenue != null ? formatCurrency(metrics.attributed_revenue, currency) : null}
+                    label="Real ROAS"
+                    source="real"
+                    value={metrics?.real_roas != null ? `${metrics.real_roas.toFixed(2)}×` : null}
+                    target={workspace_target_roas}
+                    targetDirection="above"
                     change={pctChange(
-                        metrics?.attributed_revenue ?? null,
-                        compare_metrics?.attributed_revenue ?? null,
+                        metrics?.real_roas ?? null,
+                        compare_metrics?.real_roas ?? null,
                     )}
                     loading={navigating}
-                    subtext="UTM-matched orders"
-                    tooltip="Revenue from orders where utm_source matches this platform and utm_campaign matches a campaign name. Best-effort attribution — requires UTM parameters on your store links."
+                    tooltip="UTM-attributed revenue divided by ad spend. Calculated from your actual store orders, not platform pixel attribution."
+                />
+                <MetricCard
+                    label="Real CPO"
+                    source="real"
+                    value={metrics?.real_cpo != null ? formatCurrency(metrics.real_cpo, currency) : null}
+                    invertTrend
+                    change={pctChange(
+                        metrics?.real_cpo ?? null,
+                        compare_metrics?.real_cpo ?? null,
+                    )}
+                    loading={navigating}
+                    tooltip="Ad spend divided by the number of UTM-attributed orders. Lower is better."
+                />
+                <MetricCard
+                    label="Not Tracked"
+                    source="real"
+                    value={not_tracked_pct != null ? `${not_tracked_pct.toFixed(1)}%` : null}
+                    loading={navigating}
+                    subtext={unattributed_revenue != null ? formatCurrency(unattributed_revenue, currency) : undefined}
+                    tooltip="Revenue not tracked by any ad platform. Includes organic search, direct, email, affiliates, and untagged traffic. When negative, platforms over-reported — usually due to iOS14+ modeled conversions."
                 />
             </div>
 
@@ -777,13 +758,15 @@ export default function CampaignsIndex(props: Props) {
                         navigating={navigating}
                     />
                     <CampaignTable
-                        campaigns={filteredCampaigns}
+                        campaigns={campaigns}
                         currency={currency}
                         sort={sort}
                         direction={direction}
                         onSort={setSort}
                         from={from}
                         to={to}
+                        workspaceSlug={workspace?.slug}
+                        targetRoas={workspace_target_roas ?? null}
                     />
                 </>
             )}
@@ -792,7 +775,7 @@ export default function CampaignsIndex(props: Props) {
             {view === 'quadrant' && (() => {
                 // Filter out campaigns with no ROAS signal — quadrant needs a Y value to be useful.
                 // They're still visible in the table view.
-                const allMapped: QuadrantCampaign[] = filteredCampaigns.map(c => ({
+                const allMapped: QuadrantCampaign[] = campaigns.map(c => ({
                     id:                 c.id,
                     name:               c.name,
                     platform:           c.platform,

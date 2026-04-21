@@ -9,13 +9,12 @@ use Illuminate\Database\Eloquent\Model;
 // Global reference table — NOT tenant-scoped (no workspace_id, no WorkspaceScope).
 // One row per country per holiday per year. No per-workspace duplication.
 //
-// Populated by: RefreshHolidaysJob using azuyalabs/yasumi.
-// Refreshed: January 1st each year for all countries with active workspaces.
-// Also triggered: on workspace creation if workspace.country has no holidays for current year.
+// type='public'     — national/work-free holidays via RefreshHolidaysJob + Yasumi
+// type='commercial' — curated ecommerce events via SeedCommercialEventsJob + CommercialEventCalendar
 //
 // Consumed by: DetectAnomaliesJob (skip detection on holiday dates),
 //              ComputeMetricBaselinesJob (exclude holiday dates from baseline window),
-//              chart event overlay on time-series charts (Phase 1).
+//              chart event overlays, SendHolidayNotificationsJob.
 // See: PLANNING.md "holidays"
 class Holiday extends Model
 {
@@ -26,6 +25,8 @@ class Holiday extends Model
         'date',
         'name',
         'year',
+        'type',
+        'category',
         'created_at',
     ];
 

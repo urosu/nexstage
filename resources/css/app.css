@@ -16,6 +16,9 @@
     --color-sidebar-primary: var(--sidebar-primary);
     --color-sidebar-foreground: var(--sidebar-foreground);
     --color-sidebar: var(--sidebar);
+    --color-chart-8: var(--chart-8);
+    --color-chart-7: var(--chart-7);
+    --color-chart-6: var(--chart-6);
     --color-chart-5: var(--chart-5);
     --color-chart-4: var(--chart-4);
     --color-chart-3: var(--chart-3);
@@ -72,6 +75,9 @@
     --chart-3: oklch(0.705 0.213 47.6);    /* amber-500   — spend / campaigns */
     --chart-4: oklch(0.637 0.237 25.3);    /* rose-500    — refunds / alerts */
     --chart-5: oklch(0.598 0.201 304.4);   /* violet-500  — secondary / compare */
+    --chart-6: oklch(0.685 0.169 237.3);   /* sky-500 */
+    --chart-7: oklch(0.704 0.140 182.5);   /* teal-500 */
+    --chart-8: oklch(0.686 0.222 31.0);    /* orange-500 */
     --radius: 0.625rem;
     --sidebar: oklch(0.985 0 0);
     --sidebar-foreground: oklch(0.145 0 0);
@@ -107,6 +113,9 @@
     --chart-3: oklch(0.769 0.188 47.6);    /* amber-400 */
     --chart-4: oklch(0.712 0.197 25.3);    /* rose-400 */
     --chart-5: oklch(0.671 0.179 304.4);   /* violet-400 */
+    --chart-6: oklch(0.746 0.160 232.7);   /* sky-400 */
+    --chart-7: oklch(0.777 0.152 181.9);   /* teal-400 */
+    --chart-8: oklch(0.750 0.183 55.9);    /* orange-400 */
     --sidebar: oklch(0.205 0 0);
     --sidebar-foreground: oklch(0.985 0 0);
     --sidebar-primary: oklch(0.488 0.243 264.376);
@@ -176,18 +185,48 @@
 @layer components {
   /* Settings page section card — title bar + content */
   .settings-section {
-    @apply rounded-xl border border-zinc-200 bg-white overflow-hidden;
+    border-radius: var(--radius-xl);
+    border: 1px solid var(--color-zinc-200);
+    background-color: white;
+    overflow: hidden;
   }
   .settings-section-header {
-    @apply border-b border-zinc-100 px-6 py-4;
+    border-bottom: 1px solid var(--color-zinc-100);
+    padding: 1rem 1.5rem;
   }
   .settings-section-body {
-    @apply px-6 py-5 space-y-4;
+    padding: 1.25rem 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
   }
 
-  /* Page content area — max-width constrained, consistent padding */
-  /* Already in AppLayout main — this utility lets sub-layouts reuse it */
+  /* Page content area — max-width constrained, consistent padding.
+     Already applied by AppLayout main; this lets sub-layouts reuse the same constraint. */
   .page-content {
-    @apply mx-auto max-w-[1400px] px-6 py-6;
+    margin-inline: auto;
+    max-width: 1400px;
+    padding-inline: 1.5rem;
+    padding-block: 1.5rem;
+  }
+
+  /* Uppercase overline label above charts, metric groups, and content sections */
+  .section-label {
+    font-size: 0.75rem;
+    line-height: 1rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.025em;
+    color: var(--color-zinc-400);
+  }
+
+  /* Table column header label — applied to the <tr> or <thead> row */
+  .th-label {
+    font-size: 0.75rem;
+    line-height: 1rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.025em;
+    color: var(--color-zinc-400);
   }
 }

@@ -104,7 +104,7 @@ export default function Register({ invitation_token }: { invitation_token?: stri
                         Already registered?
                     </Link>
 
-                    <Button className="ms-4" disabled={processing}>
+                    <Button type="submit" className="ms-4" disabled={processing}>
                         Register
                     </Button>
                 </div>

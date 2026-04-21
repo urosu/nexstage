@@ -66,7 +66,7 @@ export function StoreFilter({ selectedStoreIds }: Props) {
                         )}
                         title={`${store.name} — ${syncDotTitle(store.status, store.last_synced_at)}`}
                     >
-                        <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', syncDotClass(store.status, store.last_synced_at))} />
+                        <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', syncDotClass(store.status, store.last_synced_at, 'store'))} />
                         {store.name}
                     </button>
                 );

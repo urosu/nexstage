@@ -17,6 +17,9 @@ interface WorkspaceProps {
     trial_ends_at: string | null;
     target_roas: number | null;
     target_cpo: number | null;
+    holiday_lead_days: number;
+    holiday_notification_days: number;
+    commercial_notification_days: number;
 }
 
 const CURRENCIES = ['EUR', 'USD', 'GBP', 'CHF', 'PLN', 'CZK', 'HUF', 'SEK', 'NOK', 'DKK'];
@@ -39,6 +42,9 @@ export default function WorkspaceSettings({
         reporting_timezone: workspace.reporting_timezone,
         target_roas: workspace.target_roas !== null ? String(workspace.target_roas) : '',
         target_cpo:  workspace.target_cpo  !== null ? String(workspace.target_cpo)  : '',
+        holiday_lead_days: String(workspace.holiday_lead_days),
+        holiday_notification_days: String(workspace.holiday_notification_days),
+        commercial_notification_days: String(workspace.commercial_notification_days),
     });
 
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -169,6 +175,72 @@ export default function WorkspaceSettings({
                                         placeholder="e.g. 25.00"
                                     />
                                     {errors.target_cpo && <p className="mt-2 text-sm text-red-600">{errors.target_cpo}</p>}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="border-t border-zinc-100 pt-5">
+                            <p className="mb-1 text-sm font-medium text-zinc-700">Holiday settings</p>
+                            <p className="mb-4 text-xs text-zinc-400">
+                                Holidays are detected based on your workspace country. Configure how they appear in charts and when you receive reminders.
+                            </p>
+                            <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
+                                <div>
+                                    <Label htmlFor="holiday_lead_days">Chart lead time (days)</Label>
+                                    <Input
+                                        id="holiday_lead_days"
+                                        type="number"
+                                        min="0"
+                                        max="90"
+                                        step="1"
+                                        value={data.holiday_lead_days}
+                                        onChange={(e) => setData('holiday_lead_days', e.target.value)}
+                                        className="mt-1"
+                                        disabled={!canEdit}
+                                        placeholder="0"
+                                    />
+                                    <p className="mt-1 text-xs text-zinc-400">
+                                        Show chart markers this many days early. 0 = show on the actual date.
+                                    </p>
+                                    {errors.holiday_lead_days && <p className="mt-2 text-sm text-red-600">{errors.holiday_lead_days}</p>}
+                                </div>
+                                <div>
+                                    <Label htmlFor="holiday_notification_days">Email reminder (days before)</Label>
+                                    <Input
+                                        id="holiday_notification_days"
+                                        type="number"
+                                        min="0"
+                                        max="90"
+                                        step="1"
+                                        value={data.holiday_notification_days}
+                                        onChange={(e) => setData('holiday_notification_days', e.target.value)}
+                                        className="mt-1"
+                                        disabled={!canEdit}
+                                        placeholder="0"
+                                    />
+                                    <p className="mt-1 text-xs text-zinc-400">
+                                        Send a reminder email to the workspace owner this many days before each holiday. 0 = disabled.
+                                    </p>
+                                    {errors.holiday_notification_days && <p className="mt-2 text-sm text-red-600">{errors.holiday_notification_days}</p>}
+                                </div>
+                                <div>
+                                    <Label htmlFor="commercial_notification_days">Sale events reminder (days before)</Label>
+                                    <Input
+                                        id="commercial_notification_days"
+                                        type="number"
+                                        min="0"
+                                        max="90"
+                                        step="1"
+                                        value={data.commercial_notification_days}
+                                        onChange={(e) => setData('commercial_notification_days', e.target.value)}
+                                        className="mt-1"
+                                        disabled={!canEdit}
+                                        placeholder="0"
+                                    />
+                                    <p className="mt-1 text-xs text-zinc-400">
+                                        Remind before Black Friday, Singles' Day, and other ecommerce sale events. 0 = disabled.
+                                    </p>
+                                    {errors.commercial_notification_days && <p className="mt-2 text-sm text-red-600">{errors.commercial_notification_days}</p>}
                                 </div>
                             </div>
                         </div>

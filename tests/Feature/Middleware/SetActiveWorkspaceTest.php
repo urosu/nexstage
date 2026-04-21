@@ -18,7 +18,12 @@ class SetActiveWorkspaceTest extends TestCase
     private function makeUserWithWorkspace(): array
     {
         $user      = User::factory()->create();
-        $workspace = Workspace::factory()->create(['owner_id' => $user->id]);
+        // has_ads=true lets the workspace pass EnsureOnboardingComplete (ads-only path)
+        // so session-based middleware tests can hit non-workspace-prefixed routes cleanly.
+        $workspace = Workspace::factory()->create([
+            'owner_id' => $user->id,
+            'has_ads'  => true,
+        ]);
 
         WorkspaceUser::factory()->owner()->create([
             'user_id'      => $user->id,
@@ -34,7 +39,7 @@ class SetActiveWorkspaceTest extends TestCase
 
         $response = $this->actingAs($user)
             ->withSession(['active_workspace_id' => $workspace->id])
-            ->get('/dashboard');
+            ->get('/profile');
 
         $this->assertStringNotContainsString('/onboarding', $response->headers->get('Location', ''));
     }
@@ -51,7 +56,7 @@ class SetActiveWorkspaceTest extends TestCase
         $ws2 = Workspace::factory()->create(['owner_id' => $user->id]);
         WorkspaceUser::factory()->owner()->create(['user_id' => $user->id, 'workspace_id' => $ws2->id]);
 
-        $response = $this->actingAs($user)->get('/dashboard');
+        $response = $this->actingAs($user)->get('/profile');
 
         // Should NOT redirect to /onboarding (middleware found a workspace)
         $this->assertNotSame('/onboarding', $response->headers->get('Location'));
@@ -61,7 +66,7 @@ class SetActiveWorkspaceTest extends TestCase
     {
         $user = User::factory()->create();
 
-        $response = $this->actingAs($user)->get('/dashboard');
+        $response = $this->actingAs($user)->get('/profile');
 
         $response->assertRedirect('/onboarding');
     }
@@ -106,7 +111,7 @@ class SetActiveWorkspaceTest extends TestCase
             ->where('id', $workspace->id)
             ->update(['deleted_at' => now()]);
 
-        $response = $this->actingAs($user)->get('/dashboard');
+        $response = $this->actingAs($user)->get('/profile');
 
         $response->assertRedirect('/onboarding');
     }
@@ -121,7 +126,7 @@ class SetActiveWorkspaceTest extends TestCase
         // Session points to a workspace the user doesn't belong to
         $response = $this->actingAs($user)
             ->withSession(['active_workspace_id' => $otherWorkspace->id])
-            ->get('/dashboard');
+            ->get('/profile');
 
         // Falls back to ws1 — does not redirect to /onboarding
         $this->assertNotSame('/onboarding', $response->headers->get('Location'));
