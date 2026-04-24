@@ -4,6 +4,24 @@ import { cn } from '@/lib/utils';
 import { wurl } from '@/lib/workspace-url';
 import type { PageProps } from '@/types';
 
+export interface StoreCostSettings {
+    tax: {
+        deduct_tax: boolean;
+        default_tax_rate: number | null;
+        country_tax_rates: Record<string, number>;
+        zero_tax_is_b2b: boolean;
+    };
+    shipping: {
+        cost_mode: 'order' | 'flat' | 'percentage';
+        flat_rate: number | null;
+        percentage: number | null;
+    };
+    fixed_monthly_costs: Array<{ name: string; amount: number; currency: string }>;
+    cogs: {
+        custom_meta_keys: Array<{ key: string; value_type: 'unit' | 'total' }>;
+    };
+}
+
 export interface StoreData {
     id: number;
     slug: string;
@@ -15,9 +33,12 @@ export interface StoreData {
     type: string;
     primary_country_code: string | null;
     website_url: string | null;
+    cost_settings: StoreCostSettings;
 }
 
-type StoreTab = 'overview' | 'products' | 'countries' | 'seo' | 'performance' | 'settings';
+// Phase 3.8: Products, Countries, SEO, Performance moved to workspace-level destinations,
+// but the store-scoped pages still render with those tab keys.
+type StoreTab = 'overview' | 'settings' | 'products' | 'countries' | 'seo' | 'performance';
 
 interface StoreLayoutProps {
     store: StoreData;
@@ -26,12 +47,8 @@ interface StoreLayoutProps {
 }
 
 const TABS: { key: StoreTab; label: string }[] = [
-    { key: 'overview',     label: 'Overview'     },
-    { key: 'products',     label: 'Products'     },
-    { key: 'countries',    label: 'Countries'    },
-    { key: 'seo',          label: 'SEO'          },
-    { key: 'performance',  label: 'Performance'  },
-    { key: 'settings',     label: 'Settings'     },
+    { key: 'overview', label: 'Overview' },
+    { key: 'settings', label: 'Settings' },
 ];
 
 export function StoreLayout({ store, activeTab, children }: StoreLayoutProps) {

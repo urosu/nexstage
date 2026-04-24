@@ -32,7 +32,7 @@ use Throwable;
 /**
  * Imports the full ad insights history for a Facebook or Google Ads account.
  *
- * Queue:   imports
+ * Queue:   imports-ads
  * Timeout: 7200 s (2 hours)
  * Tries:   5
  * Backoff: default [60, 300, 900] s
@@ -75,7 +75,7 @@ class AdHistoricalImportJob implements ShouldQueue
         ?int $syncLogId = null,
     ) {
         $this->syncLogId = $syncLogId;
-        $this->onQueue('imports');
+        $this->onQueue('imports-ads');
     }
 
     public function handle(FxRateService $fxRates): void

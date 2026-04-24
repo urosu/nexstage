@@ -8,6 +8,7 @@ use App\Models\DailyNote;
 use App\Models\Product;
 use App\Models\Store;
 use App\Models\Workspace;
+use App\Services\NarrativeTemplateService;
 use App\Services\WorkspaceContext;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -18,6 +19,10 @@ use Inertia\Response as InertiaResponse;
 
 class AnalyticsController extends Controller
 {
+    public function __construct(
+        private readonly NarrativeTemplateService $narrative,
+    ) {}
+
     // -------------------------------------------------------------------------
     // By Product
     // -------------------------------------------------------------------------
@@ -317,6 +322,13 @@ class AnalyticsController extends Controller
 
         $totalProductCount = count($products);
 
+        // ── Narrative ────────────────────────────────────────────────────────
+        // Counts from the full tagged list before filter so the sentence describes
+        // the whole period, not just the filtered view. Phase 3.3 adds stockout-risk count.
+        $winnerCount   = count(array_filter($products, fn ($p) => $p['wl_tag'] === 'winner'));
+        $loserCount    = count(array_filter($products, fn ($p) => $p['wl_tag'] === 'loser'));
+        $pageNarrative = $this->narrative->forProducts($winnerCount, $loserCount, 0);
+
         if ($filter !== 'all') {
             $filterTag = rtrim($filter, 's');
             $products  = array_values(
@@ -343,6 +355,7 @@ class AnalyticsController extends Controller
             'filter'                => $filter,
             'classifier'            => $classifier,
             'active_classifier'     => $effectiveClassifier,
+            'narrative'             => $pageNarrative,
         ]);
     }
 
@@ -678,6 +691,18 @@ class AnalyticsController extends Controller
             'streak'     => $streak,
         ];
 
+        // ── Narrative ────────────────────────────────────────────────────────
+        // forDashboard() is re-used here: pass revenue, prior-period revenue as comparison,
+        // and the label "prior {n}-day period". ROAS and ads flags come from $totals.
+        $dailyNarrative = $this->narrative->forDashboard(
+            $totals['revenue'] > 0 ? $totals['revenue'] : null,
+            ($priorTotals['revenue'] ?? 0) > 0 ? $priorTotals['revenue'] : null,
+            'prior ' . $periodDays . '-day period',
+            $totals['roas'] ?? null,
+            $hasAds,
+            false,
+        );
+
         return Inertia::render('Analytics/Daily', [
             'rows'              => $rows,
             'rows_total_count'  => count($rows),
@@ -690,6 +715,7 @@ class AnalyticsController extends Controller
             'sort_by'           => $sortBy,
             'sort_dir'          => $sortDir,
             'hide_empty'        => $hideEmpty,
+            'narrative'         => $dailyNarrative,
         ]);
     }
 

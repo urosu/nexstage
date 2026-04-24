@@ -61,7 +61,7 @@ class EnforceBillingAccessTest extends TestCase
     {
         [$user] = $this->makeUserWithWorkspace([
             'trial_ends_at' => now()->subDays(5),
-            'billing_plan'  => 'starter',
+            'billing_plan'  => 'standard',
         ]);
 
         $response = $this->actingAs($user)->get('/profile');
@@ -100,7 +100,7 @@ class EnforceBillingAccessTest extends TestCase
         $parentWs  = Workspace::factory()->create([
             'owner_id'      => $ownerUser->id,
             'trial_ends_at' => now()->subDays(30),
-            'billing_plan'  => 'starter',
+            'billing_plan'  => 'standard',
         ]);
 
         // Child workspace with expired trial and no plan of its own

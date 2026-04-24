@@ -247,7 +247,7 @@ class FacebookOAuthController extends Controller
                     'syncable_id'   => $adAccount->id,
                     'job_type'      => \App\Jobs\AdHistoricalImportJob::class,
                     'status'        => 'queued',
-                    'queue'         => 'imports',
+                    'queue'         => 'imports-ads',
                     'scheduled_at'  => now(),
                 ]);
 
@@ -325,7 +325,7 @@ class FacebookOAuthController extends Controller
                 'syncable_id'   => $account->id,
                 'job_type'      => \App\Jobs\AdHistoricalImportJob::class,
                 'status'        => 'queued',
-                'queue'         => 'imports',
+                'queue'         => 'imports-ads',
                 'scheduled_at'  => now(),
             ]);
 

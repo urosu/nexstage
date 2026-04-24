@@ -8,6 +8,7 @@ use App\Exceptions\GoogleApiException;
 use App\Exceptions\GoogleRateLimitException;
 use App\Exceptions\GoogleTokenExpiredException;
 use App\Models\SearchConsoleProperty;
+use Illuminate\Http\Client\Pool;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
@@ -26,6 +27,12 @@ class SearchConsoleClient
 {
     private const GSC_BASE  = 'https://searchconsole.googleapis.com/webmasters/v3';
     private const TOKEN_URL = 'https://oauth2.googleapis.com/token';
+
+    /**
+     * GSC searchAnalytics.query max rowLimit per request.
+     * @see https://developers.google.com/webmaster-tools/v1/searchanalytics/query#rowLimit
+     */
+    private const ROW_LIMIT = 25000;
 
     private string $currentAccessToken;
 
@@ -103,9 +110,9 @@ class SearchConsoleClient
      * @throws GoogleRateLimitException
      * @throws GoogleApiException
      */
-    public function queryDailyStats(string $propertyUrl, string $startDate, string $endDate): array
+    public function queryDailyStats(string $propertyUrl, string $startDate, string $endDate, string $dataState = 'all'): array
     {
-        return $this->searchAnalytics($propertyUrl, $startDate, $endDate, ['date']);
+        return $this->searchAnalytics($propertyUrl, $startDate, $endDate, ['date'], $dataState);
     }
 
     /**
@@ -117,9 +124,9 @@ class SearchConsoleClient
      * @throws GoogleRateLimitException
      * @throws GoogleApiException
      */
-    public function querySearchQueries(string $propertyUrl, string $startDate, string $endDate): array
+    public function querySearchQueries(string $propertyUrl, string $startDate, string $endDate, string $dataState = 'all'): array
     {
-        return $this->searchAnalytics($propertyUrl, $startDate, $endDate, ['date', 'query']);
+        return $this->searchAnalytics($propertyUrl, $startDate, $endDate, ['date', 'query'], $dataState);
     }
 
     /**
@@ -131,9 +138,9 @@ class SearchConsoleClient
      * @throws GoogleRateLimitException
      * @throws GoogleApiException
      */
-    public function queryPages(string $propertyUrl, string $startDate, string $endDate): array
+    public function queryPages(string $propertyUrl, string $startDate, string $endDate, string $dataState = 'all'): array
     {
-        return $this->searchAnalytics($propertyUrl, $startDate, $endDate, ['date', 'page']);
+        return $this->searchAnalytics($propertyUrl, $startDate, $endDate, ['date', 'page'], $dataState);
     }
 
     /**
@@ -269,11 +276,125 @@ class SearchConsoleClient
     }
 
     // -------------------------------------------------------------------------
+    // Pooled fetch
+    // -------------------------------------------------------------------------
+
+    /**
+     * Fire a batch of searchAnalytics.query requests concurrently and return
+     * normalised rows keyed by the caller-supplied request key.
+     *
+     * Uses Laravel's Http::pool which multiplexes over curl_multi. Combined with
+     * HTTP/2 this lets us run 15+ in-flight GSC requests over a single TLS
+     * connection, while staying well under the 1,200 QPM per-property cap.
+     *
+     * Why pooled: sequential per-day requests dominate the historical-import
+     * wall time (30+ RTTs per day for a site with 3 dim-slices). Batching the
+     * 3 per-day calls and batching 5 days at a time cuts the 20h+ backfill to
+     * under 10 min.
+     *
+     * Each $requests entry: ['startDate' => ..., 'endDate' => ..., 'dimensions' => [...], 'dataState' => 'all'|'final']
+     *
+     * @param  array<string, array{startDate: string, endDate: string, dimensions: list<string>, dataState?: string}> $requests
+     * @return array<string, list<array<string, mixed>>> Rows keyed by the same key as $requests.
+     *
+     * @throws GoogleTokenExpiredException
+     * @throws GoogleRateLimitException
+     * @throws GoogleApiException
+     */
+    public function searchAnalyticsPool(string $propertyUrl, array $requests): array
+    {
+        if ($requests === []) {
+            return [];
+        }
+
+        $encodedUrl = rawurlencode($propertyUrl);
+        $endpoint   = self::GSC_BASE . "/sites/{$encodedUrl}/searchAnalytics/query";
+        $token      = $this->currentAccessToken;
+
+        /** @var array<string, \Illuminate\Http\Client\Response> $responses */
+        $responses = Http::pool(static function (Pool $pool) use ($requests, $endpoint, $token): array {
+            $promises = [];
+
+            foreach ($requests as $key => $req) {
+                $promises[] = $pool->as((string) $key)
+                    ->withToken($token)
+                    ->withOptions(['version' => 2.0])
+                    ->timeout(60)
+                    ->connectTimeout(10)
+                    ->retry(2, 500, throw: false)
+                    ->post($endpoint, [
+                        'startDate'  => $req['startDate'],
+                        'endDate'    => $req['endDate'],
+                        'dimensions' => $req['dimensions'],
+                        'rowLimit'   => self::ROW_LIMIT,
+                        'dataState'  => $req['dataState'] ?? 'all',
+                    ]);
+            }
+
+            return $promises;
+        });
+
+        // First pass: detect token expiry / rate limits across the whole batch
+        // so we surface a single typed exception and don't half-apply results.
+        $maxRetryAfter = 0;
+        $rateLimited   = false;
+
+        foreach ($responses as $response) {
+            if ($response instanceof \Throwable) {
+                throw new GoogleApiException('GSC pool transport error: ' . $response->getMessage());
+            }
+
+            $status  = $response->status();
+            $gStatus = $response->json('error.status', '');
+
+            if ($status === 401 || $gStatus === 'UNAUTHENTICATED') {
+                throw new GoogleTokenExpiredException();
+            }
+
+            if ($status === 429 || $gStatus === 'RESOURCE_EXHAUSTED') {
+                $rateLimited   = true;
+                $maxRetryAfter = max($maxRetryAfter, (int) $response->header('Retry-After', 60) ?: 60);
+            }
+        }
+
+        if ($rateLimited) {
+            Cache::put('gsc_throttled_until', now()->addSeconds($maxRetryAfter)->toISOString(), $maxRetryAfter + 60);
+            Cache::put('gsc_last_throttle_at', now()->toISOString(), 86400);
+            $hitKey = 'gsc_rate_limit_hits_' . now()->toDateString();
+            Cache::add($hitKey, 0, 172800);
+            Cache::increment($hitKey);
+
+            throw new GoogleRateLimitException($maxRetryAfter);
+        }
+
+        $out        = [];
+        $successful = 0;
+
+        foreach ($responses as $key => $response) {
+            if (! $response->successful()) {
+                $status = $response->status();
+                $reason = $response->json('error.message', "HTTP {$status}");
+                throw new GoogleApiException("GSC API error ({$status}) for key {$key}: {$reason}");
+            }
+
+            $successful++;
+            $out[(string) $key] = $this->normaliseRows(
+                $response->json('rows', []),
+                $requests[$key]['dimensions'],
+            );
+        }
+
+        $this->recordSuccessfulCalls($successful);
+
+        return $out;
+    }
+
+    // -------------------------------------------------------------------------
     // Internal helpers
     // -------------------------------------------------------------------------
 
     /**
-     * Call the searchAnalytics endpoint with the given dimensions.
+     * Call the searchAnalytics endpoint with the given dimensions (single request).
      *
      * @param  list<string>  $dimensions  e.g. ['date'], ['date','query'], ['date','page']
      * @return list<array<string, mixed>>
@@ -287,35 +408,42 @@ class SearchConsoleClient
         string $startDate,
         string $endDate,
         array $dimensions,
+        string $dataState = 'all',
     ): array {
         $encodedUrl = rawurlencode($propertyUrl);
 
         $response = Http::withToken($this->currentAccessToken)
-            ->timeout(30)
+            ->withOptions(['version' => 2.0])
+            ->timeout(60)
+            ->connectTimeout(10)
+            ->retry(2, 500, throw: false)
             ->post(self::GSC_BASE . "/sites/{$encodedUrl}/searchAnalytics/query", [
                 'startDate'  => $startDate,
                 'endDate'    => $endDate,
                 'dimensions' => $dimensions,
-                'rowLimit'   => 1000,
-                'dataState'  => 'all',
+                'rowLimit'   => self::ROW_LIMIT,
+                'dataState'  => $dataState,
             ]);
 
         $this->assertSuccess($response);
+        $this->recordSuccessfulCalls(1);
 
-        // Record successful call for admin quota visibility.
-        $today = now()->toDateString();
-        Cache::put('gsc_last_success_at', now()->toISOString(), 86400);
-        $callKey = 'gsc_calls_' . $today;
-        Cache::add($callKey, 0, 172800);
-        Cache::increment($callKey);
+        return $this->normaliseRows($response->json('rows', []), $dimensions);
+    }
 
-        $rows = $response->json('rows', []);
-
-        // Normalise each row: the 'keys' array maps positionally to $dimensions.
+    /**
+     * Map GSC's positional 'keys' array onto the requested dimension names.
+     *
+     * @param  list<array<string, mixed>>  $rows
+     * @param  list<string>                $dimensions
+     * @return list<array<string, mixed>>
+     */
+    private function normaliseRows(array $rows, array $dimensions): array
+    {
         $normalized = [];
 
         foreach ($rows as $row) {
-            $keys = $row['keys'] ?? [];
+            $keys  = $row['keys'] ?? [];
             $entry = [
                 'clicks'      => (int) ($row['clicks'] ?? 0),
                 'impressions' => (int) ($row['impressions'] ?? 0),
@@ -331,6 +459,19 @@ class SearchConsoleClient
         }
 
         return $normalized;
+    }
+
+    private function recordSuccessfulCalls(int $count): void
+    {
+        if ($count <= 0) {
+            return;
+        }
+
+        Cache::put('gsc_last_success_at', now()->toISOString(), 86400);
+
+        $callKey = 'gsc_calls_' . now()->toDateString();
+        Cache::add($callKey, 0, 172800);
+        Cache::increment($callKey, $count);
     }
 
     /**

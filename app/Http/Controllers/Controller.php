@@ -11,15 +11,15 @@ abstract class Controller
     use \Illuminate\Foundation\Auth\Access\AuthorizesRequests;
 
     /**
-     * Redirect to a workspace's dashboard URL.
+     * Redirect to a workspace's Home URL.
      *
-     * Why: dashboard is workspace-prefixed (/{slug}/dashboard), so every redirect
-     * to "the dashboard" must know which workspace's slug to use.
+     * Why: home is workspace-prefixed (/{slug}), so every redirect
+     * to "the home" must know which workspace's slug to use.
      */
     protected function toDashboard(int $workspaceId): RedirectResponse
     {
         $slug = Workspace::select('slug')->findOrFail($workspaceId)->slug;
-        return redirect("/{$slug}/dashboard");
+        return redirect("/{$slug}");
     }
 
     /**

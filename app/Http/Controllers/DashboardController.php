@@ -14,10 +14,14 @@ use App\Models\Holiday;
 use App\Models\HourlySnapshot;
 use App\Models\LighthouseSnapshot;
 use App\Models\Order;
+use App\Models\OrderItem;
 use App\Models\Store;
 use App\Models\StoreUrl;
+use App\Models\UptimeDailySummary;
 use App\Models\Workspace;
 use App\Models\WorkspaceEvent;
+use App\Services\NarrativeTemplateService;
+use App\Services\ProfitCalculator;
 use App\Services\RevenueAttributionService;
 use App\Services\WorkspaceContext;
 use Carbon\Carbon;
@@ -41,6 +45,7 @@ class DashboardController extends Controller
 {
     public function __construct(
         private readonly RevenueAttributionService $attribution,
+        private readonly NarrativeTemplateService  $narrative,
     ) {}
 
     public function __invoke(Request $request): Response
@@ -62,7 +67,9 @@ class DashboardController extends Controller
         $compareFrom = $validated['compare_from'] ?? null;
         $compareTo   = $validated['compare_to']   ?? null;
         $granularity = $validated['granularity']  ?? 'daily';
-        $storeIds    = $this->parseStoreIds($validated['store_ids'] ?? '', $workspaceId);
+        $storeIds     = $this->parseStoreIds($validated['store_ids'] ?? '', $workspaceId);
+        $stores       = Store::withoutGlobalScopes()->where('workspace_id', $workspaceId)->get();
+        $costSettings = ProfitCalculator::settingsForStores($storeIds, $stores);
 
         // Compute primary metrics (store + paid + attribution).
         // Always run even if has_store is false — user might have only ads connected.
@@ -109,6 +116,16 @@ class DashboardController extends Controller
             ->where('workspace_id', $workspaceId)
             ->distinct('date')
             ->count('date');
+
+        // When no snapshots exist yet, count raw orders so the UI can show
+        // "X orders imported — snapshots are being built" instead of a silent 0,00€.
+        // Only runs on day-1 (days_of_data === 0) to avoid the overhead on normal loads.
+        $rawOrdersCount = ($daysOfData === 0)
+            ? Order::withoutGlobalScopes()
+                ->where('workspace_id', $workspaceId)
+                ->whereIn('status', ['completed', 'processing'])
+                ->count()
+            : 0;
 
         $aiSummary = AiSummary::withoutGlobalScopes()
             ->where('workspace_id', $workspaceId)
@@ -241,6 +258,42 @@ class DashboardController extends Controller
             ? $this->computeRecentOrders($workspaceId, $storeIds)
             : null;
 
+        // Phase 3.6 — Home: Today's Attention, Contribution Margin, Channel roll-up, Uptime.
+        $attentionItems  = $this->computeTodaysAttention($workspaceId);
+        $cm              = $this->computeContributionMargin(
+            $workspaceId, $from, $to, $storeIds, $metrics['ad_spend'] ?? 0, $costSettings,
+        );
+        $channelRollup   = $this->computeChannelRollup($workspaceId, $from, $to, $metrics['ad_spend'] ?? 0);
+        $uptime30dPct    = UptimeDailySummary::withoutGlobalScopes()
+            ->where('workspace_id', $workspaceId)
+            ->where('date', '>=', now()->subDays(30)->toDateString())
+            ->avg('uptime_pct');
+
+        // Page narrative — uses same-weekday-last-week comparison when the selected range
+        // ends today (the most common case). For custom ranges, comparison label is null.
+        $comparisonLabel = null;
+        $compareRevenueForNarrative = null;
+        $sameWeekdayMetrics = null;
+        if ($to === now()->toDateString()) {
+            $weekdayName              = now()->format('l'); // e.g. "Wednesday"
+            $comparisonLabel          = "last {$weekdayName}";
+            $sameWeekdayDate          = now()->subDays(7)->toDateString();
+            $sameWeekdayMetrics       = $this->computeMetrics($workspaceId, $sameWeekdayDate, $sameWeekdayDate, $storeIds);
+            $compareRevenueForNarrative = $sameWeekdayMetrics['revenue'] > 0 ? $sameWeekdayMetrics['revenue'] : null;
+        } elseif ($compareMetrics !== null) {
+            $comparisonLabel          = 'prior period';
+            $compareRevenueForNarrative = $compareMetrics['revenue'] > 0 ? $compareMetrics['revenue'] : null;
+        }
+
+        $pageNarrative = $this->narrative->forDashboard(
+            revenue:          $metrics['revenue'] > 0 ? $metrics['revenue'] : null,
+            compareRevenue:   $compareRevenueForNarrative,
+            comparisonLabel:  $comparisonLabel,
+            roas:             $metrics['roas'],
+            hasAds:           $workspace->has_ads,
+            hasGsc:           $workspace->has_gsc,
+        );
+
         return Inertia::render('Dashboard', [
             'psi_metrics'                   => $psiMetrics,
             'metrics'                       => $metrics,
@@ -260,6 +313,7 @@ class DashboardController extends Controller
                 'created_at' => $topAlert->created_at->toDateTimeString(),
             ] : null,
             'days_of_data'                  => $daysOfData,
+            'raw_orders_count'              => $rawOrdersCount,
             'ai_summary'                    => $aiSummary,
             'has_null_fx'                   => $hasNullFx,
             'granularity'                   => $granularity,
@@ -271,6 +325,14 @@ class DashboardController extends Controller
             'trend_dots'                    => $trendDots,
             'daily_avg_delta'               => $dailyAvgDelta,
             'recent_orders'                 => $recentOrders,
+            // Phase 3.1 — page narrative header
+            'narrative'                     => $pageNarrative,
+            // Phase 3.6 — Home rebuild
+            'attention_items'               => $attentionItems,
+            'contribution_margin'           => $cm,
+            'channel_rollup'                => $channelRollup,
+            'uptime_30d_pct'                => $uptime30dPct !== null ? (float) $uptime30dPct : null,
+            'same_weekday_metrics'          => $sameWeekdayMetrics,
         ]);
     }
 
@@ -932,5 +994,229 @@ class DashboardController extends Controller
             'feed_source'    => $feedSource,
             'last_synced_at' => $lastSyncedAt?->toISOString(),
         ];
+    }
+
+    /**
+     * Build the "Today's Attention" list for the Home page.
+     *
+     * Merges unresolved alerts (severity != info) with open recommendations sorted by
+     * priority, capped at 5 total items. Alerts take precedence over recommendations.
+     *
+     * Reads from: alerts, recommendations
+     * @return array<int, array{text:string, href:string, severity:string}>
+     */
+    private function computeTodaysAttention(int $workspaceId): array
+    {
+        $items = [];
+
+        // Unresolved non-info alerts first.
+        $alerts = Alert::withoutGlobalScopes()
+            ->where('workspace_id', $workspaceId)
+            ->whereNull('resolved_at')
+            ->where('is_silent', false)
+            ->whereNotIn('severity', ['info'])
+            ->select(['type', 'severity', 'created_at'])
+            ->orderByRaw("CASE severity WHEN 'critical' THEN 1 WHEN 'warning' THEN 2 ELSE 3 END")
+            ->orderByDesc('created_at')
+            ->limit(5)
+            ->get();
+
+        foreach ($alerts as $alert) {
+            $items[] = [
+                'text'     => ucfirst(str_replace('_', ' ', $alert->type)),
+                'href'     => '/manage/integrations',
+                'severity' => $alert->severity === 'critical' ? 'critical' : 'warning',
+            ];
+        }
+
+        // Fill remaining slots with open recommendations (sorted by priority ASC = higher priority first).
+        $remaining = 5 - count($items);
+        if ($remaining > 0) {
+            $recs = DB::table('recommendations')
+                ->where('workspace_id', $workspaceId)
+                ->where('status', 'open')
+                ->where(function ($q) {
+                    $q->whereNull('snoozed_until')
+                      ->orWhere('snoozed_until', '<', now());
+                })
+                ->orderBy('priority')
+                ->orderByDesc('created_at')
+                ->limit($remaining)
+                ->get(['title', 'body', 'target_url', 'priority']);
+
+            foreach ($recs as $rec) {
+                $items[] = [
+                    'text'     => $rec->title,
+                    'href'     => $rec->target_url ?? '/acquisition',
+                    'severity' => 'info',
+                ];
+            }
+        }
+
+        return array_slice($items, 0, 5);
+    }
+
+    /**
+     * Compute Contribution Margin for the Home hero card (§F3).
+     *
+     * CM = Revenue − COGS − Fees − Ad Spend
+     * Returns null CM + cogs_configured=false when >50% of order_items have NULL unit_cost.
+     *
+     * @param int[] $storeIds
+     * @return array{cm:float|null, cogs_configured:bool}
+     */
+    private function computeContributionMargin(
+        int $workspaceId,
+        string $from,
+        string $to,
+        array $storeIds,
+        float $adSpend,
+        \App\ValueObjects\StoreCostSettings $costSettings,
+    ): array {
+        $orderQuery = DB::table('orders')
+            ->where('orders.workspace_id', $workspaceId)
+            ->whereIn('orders.status', ['completed', 'processing'])
+            ->whereBetween('orders.occurred_at', [$from . ' 00:00:00', $to . ' 23:59:59']);
+
+        if (! empty($storeIds)) {
+            $orderQuery->whereIn('orders.store_id', $storeIds);
+        }
+
+        // Check COGS availability: >50% NULL → not configured.
+        $cogsStats = (clone $orderQuery)
+            ->join('order_items', 'order_items.order_id', '=', 'orders.id')
+            ->selectRaw('
+                COUNT(*) AS total_items,
+                COUNT(order_items.unit_cost) AS items_with_cost
+            ')
+            ->first();
+
+        $totalItems    = (int) ($cogsStats->total_items    ?? 0);
+        $itemsWithCost = (int) ($cogsStats->items_with_cost ?? 0);
+        $cogsConfigured = $totalItems === 0 || ($itemsWithCost / $totalItems) > 0.5;
+
+        if (! $cogsConfigured) {
+            return ['cm' => null, 'cogs_configured' => false];
+        }
+
+        // COGS + fees + tax + refund aggregation.
+        $agg = (clone $orderQuery)
+            ->leftJoin('order_items', 'order_items.order_id', '=', 'orders.id')
+            ->selectRaw('
+                COALESCE(SUM(order_items.unit_cost * order_items.quantity), 0)                                              AS cogs,
+                COALESCE(SUM(orders.payment_fee), 0)                                                                        AS payment_fees,
+                COALESCE(SUM(orders.shipping), 0)                                                                           AS shipping_fees,
+                COALESCE(SUM(orders.total_in_reporting_currency), SUM(orders.total), 0)                                     AS revenue,
+                COALESCE(SUM(orders.tax), 0)                                                                                AS total_tax,
+                COALESCE(SUM(orders.refund_amount), 0)                                                                      AS total_refunds,
+                COALESCE(SUM(CASE WHEN orders.tax = 0 THEN COALESCE(orders.total_in_reporting_currency, orders.total) ELSE 0 END), 0) AS revenue_no_tax,
+                COUNT(DISTINCT orders.id)                                                                                   AS order_count
+            ')
+            ->first();
+
+        $cogs    = (float) ($agg->cogs         ?? 0);
+        $revenue = (float) ($agg->revenue      ?? 0);
+
+        $profitAdj = ProfitCalculator::compute(
+            revenue:       $revenue,
+            totalTax:      (float) ($agg->total_tax      ?? 0),
+            revenueNoTax:  (float) ($agg->revenue_no_tax ?? 0),
+            totalRefunds:  (float) ($agg->total_refunds  ?? 0),
+            totalShipping: (float) ($agg->shipping_fees  ?? 0),
+            orderCount:    (int)   ($agg->order_count    ?? 0),
+            settings:      $costSettings,
+        );
+
+        $fees = (float) ($agg->payment_fees ?? 0) + $profitAdj['effective_shipping'];
+        $cm   = $profitAdj['net_revenue'] - $cogs - $fees - $adSpend;
+
+        $fixedCosts = $costSettings->proratedFixedCosts($from, $to);
+
+        return [
+            'cm'           => round($cm - $fixedCosts, 2),
+            'fixed_costs'  => $fixedCosts > 0 ? round($fixedCosts, 2) : null,
+            'cogs_configured' => true,
+        ];
+    }
+
+    /**
+     * Compute the 5-row §M1 channel roll-up for the Home page.
+     *
+     * Groups orders by attribution_last_touch channel_type and maps to the
+     * 5-row rollup: Paid Search / Paid Social / Organic / Email / Direct.
+     * Ad spend attached only to Paid Search + Paid Social rows (§F4).
+     *
+     * @see PROGRESS.md §M1 — channel_type → 5-row rollup
+     * @return array<int, array{channel:string, revenue:float, spend:float|null, roas:float|null}>
+     */
+    private function computeChannelRollup(
+        int $workspaceId,
+        string $from,
+        string $to,
+        float $totalAdSpend,
+    ): array {
+        // §M1 mapping
+        $channelMap = [
+            'paid_search'    => 'Paid Search',
+            'paid_social'    => 'Paid Social',
+            'organic_search' => 'Organic',
+            'organic_social' => 'Organic',
+            'email'          => 'Email',
+            'sms'            => 'Email',
+            'direct'         => 'Direct',
+            'referral'       => 'Direct',
+            'affiliate'      => 'Paid Social',
+            'other'          => 'Direct',
+        ];
+
+        $rows = DB::table('orders')
+            ->where('workspace_id', $workspaceId)
+            ->whereIn('status', ['completed', 'processing'])
+            ->whereBetween('occurred_at', [$from . ' 00:00:00', $to . ' 23:59:59'])
+            ->whereNotNull('attribution_last_touch')
+            ->selectRaw("
+                attribution_last_touch->>'channel_type' AS channel_type,
+                COALESCE(SUM(total_in_reporting_currency), SUM(total), 0) AS revenue
+            ")
+            ->groupByRaw("attribution_last_touch->>'channel_type'")
+            ->get();
+
+        // Aggregate by rollup label.
+        $rollup = [
+            'Paid Search'  => 0.0,
+            'Paid Social'  => 0.0,
+            'Organic'      => 0.0,
+            'Email'        => 0.0,
+            'Direct'       => 0.0,
+        ];
+
+        foreach ($rows as $row) {
+            $label = $channelMap[$row->channel_type] ?? 'Direct';
+            $rollup[$label] += (float) $row->revenue;
+        }
+
+        // Ad spend split: Paid Search and Paid Social get proportional share.
+        $paidRevenue   = $rollup['Paid Search'] + $rollup['Paid Social'];
+        $result = [];
+        foreach ($rollup as $channel => $revenue) {
+            $spend = null;
+            $roas  = null;
+            if ($totalAdSpend > 0 && in_array($channel, ['Paid Search', 'Paid Social'], true)) {
+                // Distribute total ad spend proportionally by attributed revenue.
+                $spend = $paidRevenue > 0
+                    ? round($totalAdSpend * ($revenue / $paidRevenue), 2)
+                    : round($totalAdSpend / 2, 2);
+                $roas  = $spend > 0 ? round($revenue / $spend, 2) : null;
+            }
+
+            $result[] = [
+                'channel' => $channel,
+                'revenue' => round($revenue, 2),
+                'spend'   => $spend,
+                'roas'    => $roas,
+            ];
+        }
+
+        return $result;
     }
 }

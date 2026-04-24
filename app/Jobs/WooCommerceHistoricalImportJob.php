@@ -24,7 +24,7 @@ use Illuminate\Support\Facades\Log;
 /**
  * Imports the full order history for a WooCommerce store.
  *
- * Queue:   imports
+ * Queue:   imports-store
  * Timeout: 7200 s (2 hours)
  * Tries:   3
  * Backoff: default [60, 300, 900] s
@@ -73,7 +73,7 @@ class WooCommerceHistoricalImportJob implements ShouldQueue
         private readonly int  $workspaceId,
         private ?int          $syncLogId = null,
     ) {
-        $this->onQueue('imports');
+        $this->onQueue('imports-store');
     }
 
     public function handle(UpsertWooCommerceOrderAction $action): void

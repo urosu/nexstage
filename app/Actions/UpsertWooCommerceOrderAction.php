@@ -34,6 +34,16 @@ use Illuminate\Support\Facades\Log;
  *   Writes to order_items.unit_cost. Not feature-flagged — COGS data is safe to
  *   write immediately and has no impact on existing attribution reads.
  *
+ * payment_fee (Phase 3.1):
+ *   Summed from raw_meta.fee_lines where the fee name matches known payment-processor
+ *   keywords (Stripe, PayPal, Mollie, Klarna, etc.). raw_meta.fee_lines is still the
+ *   source of truth — this column is a fast-aggregation projection for CM queries.
+ *
+ * is_first_for_customer (Phase 3.1):
+ *   Set to true when no earlier order exists for the same workspace + customer_email_hash.
+ *   Recomputed on every re-upsert so backfilled older orders shift the "first" correctly.
+ *   Guest checkouts (NULL hash) always receive false.
+ *
  * PYS data in raw_meta:
  *   pys_enrich_data and pys_fb_cookie are array-valued meta entries (non-scalar, so
  *   excluded from buildMetaMap). They are extracted separately and stored in raw_meta
@@ -87,6 +97,10 @@ class UpsertWooCommerceOrderAction
         // (PixelYourSiteSource reads pys_enrich_data from orders.raw_meta).
         $rawMetaArray = $this->buildRawMetaArray($wcOrder);
 
+        $customerEmailHash  = $this->hashEmail($wcOrder['billing']['email'] ?? '');
+        $paymentFee         = $this->computePaymentFee($wcOrder);
+        $isFirstForCustomer = $this->computeIsFirstForCustomer($customerEmailHash, $store->workspace_id, $occurredAt);
+
         $orderRow = [
             'workspace_id'                => $store->workspace_id,
             'store_id'                    => $store->id,
@@ -98,11 +112,13 @@ class UpsertWooCommerceOrderAction
             'subtotal'                    => (float) ($wcOrder['subtotal'] ?? 0),
             'tax'                         => (float) ($wcOrder['total_tax'] ?? 0),
             'shipping'                    => (float) ($wcOrder['shipping_total'] ?? 0),
+            'payment_fee'                 => $paymentFee,
             'discount'                    => (float) ($wcOrder['discount_total'] ?? 0),
             'total_in_reporting_currency' => $totalInReporting,
-            'customer_email_hash'         => $this->hashEmail($wcOrder['billing']['email'] ?? ''),
+            'customer_email_hash'         => $customerEmailHash,
             'customer_country'            => $this->nullableString($wcOrder['billing']['country'] ?? null),
             'customer_id'                 => $this->nullableString($wcOrder['customer_id'] ?? null),
+            'is_first_for_customer'       => $isFirstForCustomer,
             'payment_method'              => $this->nullableString($wcOrder['payment_method'] ?? null),
             'payment_method_title'        => $this->nullableString($wcOrder['payment_method_title'] ?? null),
             'shipping_country'            => $this->nullableString($wcOrder['shipping']['country'] ?? null),
@@ -129,8 +145,8 @@ class UpsertWooCommerceOrderAction
         // Base update columns — always applied on conflict.
         $updateColumns = [
             'external_number', 'status', 'currency', 'total', 'subtotal',
-            'tax', 'shipping', 'discount', 'total_in_reporting_currency',
-            'customer_email_hash', 'customer_country', 'customer_id',
+            'tax', 'shipping', 'payment_fee', 'discount', 'total_in_reporting_currency',
+            'customer_email_hash', 'customer_country', 'customer_id', 'is_first_for_customer',
             'payment_method', 'payment_method_title', 'shipping_country',
             'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'source_type',
             'raw_meta', 'raw_meta_api_version',
@@ -428,7 +444,7 @@ class UpsertWooCommerceOrderAction
                     'sku'                 => $this->nullableString($item['sku'] ?? null),
                     'quantity'            => (int) ($item['quantity'] ?? 0),
                     'unit_price'          => (float) ($item['price'] ?? 0),
-                    'unit_cost'           => $this->cogs->readFromLineItem($item),
+                    'unit_cost'           => $this->cogs->readFromLineItem($item, $store->cost_settings->customCogsMetaKeys),
                     'line_total'          => (float) ($item['total'] ?? 0),
                     'created_at'          => $now,
                     'updated_at'          => $now,
@@ -451,7 +467,7 @@ class UpsertWooCommerceOrderAction
         $now  = now()->toDateTimeString();
 
         foreach ($couponLines as $coupon) {
-            $code = trim((string) ($coupon['code'] ?? ''));
+            $code = strtolower(trim((string) ($coupon['code'] ?? '')));
 
             if ($code === '') {
                 continue;
@@ -468,6 +484,58 @@ class UpsertWooCommerceOrderAction
         }
 
         return $rows;
+    }
+
+    /**
+     * Sum fee_lines where the fee name indicates a payment-processor charge.
+     *
+     * raw_meta.fee_lines is the source of truth. This column is a fast-aggregation
+     * projection: summing DECIMAL is ~50× faster than JSONB path extraction at scale,
+     * which matters because payment_fee appears in every CM aggregation.
+     *
+     * @param array<string, mixed> $wcOrder
+     */
+    private function computePaymentFee(array $wcOrder): float
+    {
+        $keywords = [
+            'stripe', 'paypal', 'mollie', 'klarna', 'adyen', 'braintree',
+            'square', 'transaction fee', 'payment fee', 'processing fee',
+        ];
+
+        $total = 0.0;
+
+        foreach ($wcOrder['fee_lines'] ?? [] as $feeLine) {
+            $name = strtolower((string) ($feeLine['name'] ?? ''));
+
+            foreach ($keywords as $keyword) {
+                if (str_contains($name, $keyword)) {
+                    $total += abs((float) ($feeLine['total'] ?? 0));
+                    break;
+                }
+            }
+        }
+
+        return $total;
+    }
+
+    /**
+     * Return true when no earlier order exists for this customer in this workspace.
+     *
+     * Checked before the upsert so re-upserts recompute correctly — if an older order
+     * is later backfilled, the next sync of a newer order will flip its flag to false.
+     * Orders with a NULL hash (guest checkout) are never considered "first".
+     */
+    private function computeIsFirstForCustomer(?string $customerEmailHash, int $workspaceId, Carbon $occurredAt): bool
+    {
+        if ($customerEmailHash === null) {
+            return false;
+        }
+
+        return ! DB::table('orders')
+            ->where('workspace_id', $workspaceId)
+            ->where('customer_email_hash', $customerEmailHash)
+            ->where('occurred_at', '<', $occurredAt->toDateTimeString())
+            ->exists();
     }
 
     /**

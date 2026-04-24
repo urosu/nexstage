@@ -203,18 +203,21 @@ class RevenueAttributionService
         array $campaigns,
         CarbonInterface $from,
         CarbonInterface $to,
+        string $attrColumn = 'attribution_last_touch',
     ): array {
-        // One query: aggregate by the raw campaign key stored in attribution_last_touch
+        // One query: aggregate by the raw campaign key stored in the chosen attribution column.
+        // $attrColumn is 'attribution_last_touch' (default) or 'attribution_first_touch' when
+        // the caller is using first-touch attribution model.
         $rows = DB::table('orders')
             ->where('workspace_id', $workspaceId)
             ->whereIn('status', ['completed', 'processing'])
             ->whereNotNull('total_in_reporting_currency')
-            ->whereNotNull(DB::raw("attribution_last_touch->>'campaign'"))
+            ->whereNotNull(DB::raw("{$attrColumn}->>'campaign'"))
             ->whereBetween('occurred_at', [$from->toDateTimeString(), $to->toDateTimeString()])
             ->selectRaw(
-                "LOWER(attribution_last_touch->>'campaign') AS campaign_key, SUM(total_in_reporting_currency) AS revenue",
+                "LOWER({$attrColumn}->>'campaign') AS campaign_key, SUM(total_in_reporting_currency) AS revenue",
             )
-            ->groupBy(DB::raw("LOWER(attribution_last_touch->>'campaign')"))
+            ->groupBy(DB::raw("LOWER({$attrColumn}->>'campaign')"))
             ->pluck('revenue', 'campaign_key');
 
         $result = [];

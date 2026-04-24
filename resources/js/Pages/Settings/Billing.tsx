@@ -129,13 +129,6 @@ interface Subscription {
     on_grace_period: boolean;
 }
 
-interface TierPrices {
-    monthly: number | null;
-    annual: number | null;
-    rate_gmv: number | null;
-    rate_ad_spend: number | null;
-}
-
 interface PaymentMethod {
     id: string;
     brand: string | null;
@@ -172,33 +165,19 @@ interface Props {
     last_month_revenue: number;
     current_month_revenue: number;
     projected_month_revenue: number | null;
-    resolved_tier: string;
-    current_month_tier: string;
-    projected_month_tier: string | null;
+    last_month_bill: number;
+    projected_bill: number | null;
+    plan_rate: number;
+    plan_minimum: number;
     days_until_billing: number;
     day_of_month: number;
     days_in_month: number;
-    tier_prices: Record<string, TierPrices>;
     /** 'gmv' for ecom workspaces (has_store=true), 'ad_spend' for non-ecom */
     billing_basis: 'gmv' | 'ad_spend';
     status?: string;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-const PLAN_LABELS: Record<string, string> = {
-    starter: 'Starter',
-    growth: 'Growth',
-    scale: 'Scale',
-    enterprise: 'Enterprise',
-};
-
-// Revenue thresholds per tier (in EUR, for display purposes)
-const TIER_THRESHOLDS: Record<string, string> = {
-    starter: '€0 – €5k / mo',
-    growth:  '€5k – €25k / mo',
-    scale:   'Over €25k / mo',
-};
 
 function formatEur(value: number): string {
     return new Intl.NumberFormat('en-IE', {
@@ -346,13 +325,13 @@ export default function Billing({
     last_month_revenue,
     current_month_revenue,
     projected_month_revenue,
-    resolved_tier,
-    current_month_tier,
-    projected_month_tier,
+    last_month_bill,
+    projected_bill,
+    plan_rate,
+    plan_minimum,
     days_until_billing,
     day_of_month,
     days_in_month,
-    tier_prices,
     billing_basis,
     status,
 }: Props) {
@@ -360,7 +339,6 @@ export default function Billing({
     const w = (path: string) => wurl(ws?.slug, path);
 
     const [tab, setTab]             = useState<Tab>('overview');
-    const [interval, setInterval]   = useState<'monthly' | 'annual'>('monthly');
     const [subscribing, setSubscribing] = useState(false);
     const [showAddCard, setShowAddCard] = useState(false);
 
@@ -387,7 +365,7 @@ export default function Billing({
 
     const handleSubscribe = () => {
         setSubscribing(true);
-        router.post(w('/settings/billing/subscribe'), { interval }, {
+        router.post(w('/settings/billing/subscribe'), {}, {
             onFinish: () => setSubscribing(false),
         });
     };
@@ -413,38 +391,17 @@ export default function Billing({
 
     const currentPlan = workspaceInfo.billing_plan;
 
-    function tierCost(tier: string, billingInterval: 'monthly' | 'annual'): number | null {
-        if (tier === 'scale') return null; // metered — no flat fee
-        return (billingInterval === 'annual' ? tier_prices[tier]?.annual : tier_prices[tier]?.monthly) ?? null;
-    }
-
-    function revenueCost(tier: string, revenue: number, billingInterval: 'monthly' | 'annual'): number | null {
-        if (tier === 'scale') {
-            const rate = billing_basis === 'ad_spend'
-                ? (tier_prices['scale']?.rate_ad_spend ?? 0.02)
-                : (tier_prices['scale']?.rate_gmv ?? 0.01);
-            return Math.max(Math.round(revenue * rate), 149);
-        }
-        return tierCost(tier, billingInterval);
-    }
-
     // Label for the billable amount metric (GMV or ad spend)
-    const billableLabel = billing_basis === 'ad_spend' ? 'ad spend' : 'revenue';
-    const scaleRateLabel = billing_basis === 'ad_spend' ? '2% of ad spend' : '1% of GMV';
+    const billableLabel = billing_basis === 'ad_spend' ? 'ad spend' : 'GMV';
+    const ratePct = plan_rate * 100;
+    const priceDescription = `€${plan_minimum}/mo minimum + ${ratePct}% of ${billableLabel}`;
 
     // Days remaining in trial (for countdown warning)
     const trialDaysLeft = workspaceInfo.trial_ends_at
         ? Math.ceil((new Date(workspaceInfo.trial_ends_at).getTime() - Date.now()) / 86_400_000)
         : null;
 
-    // lastMonthCost: always monthly — this shows historical billing, not the subscribe toggle
-    const lastMonthCost     = last_month_revenue > 0 ? revenueCost(resolved_tier, last_month_revenue, 'monthly') : null;
-    const displayTier       = projected_month_tier ?? current_month_tier;
-    const displayRevenue    = projected_month_revenue ?? current_month_revenue;
-    const displayCost       = revenueCost(displayTier, displayRevenue, interval);
-    const effectiveTier     = projected_month_tier ?? current_month_tier;
-    const tierChangePending = last_month_revenue > 0 && effectiveTier !== resolved_tier;
-    const billingImminent   = days_until_billing <= 7;
+    const billingImminent = days_until_billing <= 7;
 
     const tabs: { key: Tab; label: string; badge?: number }[] = [
         { key: 'overview', label: 'Overview' },
@@ -528,7 +485,26 @@ export default function Billing({
                             </div>
                             <div className="px-6 py-5 space-y-5">
 
-                                {/* Revenue → cost grid */}
+                                {/* Plan name & price description */}
+                                <div className="flex items-start justify-between gap-4">
+                                    <div>
+                                        <p className="text-base font-semibold text-zinc-900">
+                                            {currentPlan === 'enterprise' ? 'Enterprise' : 'Standard'}
+                                        </p>
+                                        {currentPlan !== 'enterprise' && (
+                                            <p className="mt-0.5 text-sm text-zinc-500">{priceDescription}</p>
+                                        )}
+                                    </div>
+                                    <div className="flex shrink-0 items-center gap-2">
+                                        {isOnTrial && !currentPlan && <StatusBadge variant="indigo">Trial</StatusBadge>}
+                                        {trialEnded && !currentPlan && <StatusBadge variant="red">Trial expired</StatusBadge>}
+                                        {currentPlan && subscription?.on_grace_period && <StatusBadge variant="yellow">Cancelling</StatusBadge>}
+                                        {currentPlan && !subscription?.on_grace_period && <StatusBadge variant="green">Active</StatusBadge>}
+                                    </div>
+                                </div>
+
+                                {/* Revenue → bill grid (hidden for enterprise) */}
+                                {currentPlan !== 'enterprise' && (
                                 <div className="grid grid-cols-2 divide-x divide-zinc-100 -mx-6 px-6">
 
                                     {/* Last month */}
@@ -536,12 +512,13 @@ export default function Billing({
                                         <p className="text-xs font-medium text-zinc-400 uppercase tracking-wide">Last month</p>
                                         {last_month_revenue > 0 ? (
                                             <>
-                                                <p className="mt-1 text-base font-semibold text-zinc-900">{PLAN_LABELS[resolved_tier] ?? resolved_tier}</p>
+                                                <p className="text-xs text-zinc-400">{billableLabel}</p>
+                                                <p className="text-base font-semibold text-zinc-900">{formatEur(last_month_revenue)}</p>
+                                                <p className="mt-2 text-xs text-zinc-400">Bill</p>
                                                 <p className="text-xl font-semibold text-zinc-900">
-                                                    {lastMonthCost !== null ? `${formatEur(lastMonthCost)}/mo` : scaleRateLabel}
+                                                    {formatEur(last_month_bill)}
                                                     <span className="ml-1.5 text-xs font-normal text-zinc-400">billed</span>
                                                 </p>
-                                                <p className="text-xs text-zinc-400">{formatEur(last_month_revenue)} {billableLabel}</p>
                                             </>
                                         ) : (
                                             <p className="mt-1 text-sm text-zinc-400">No data yet</p>
@@ -550,47 +527,41 @@ export default function Billing({
 
                                     {/* This month */}
                                     <div className="pl-6 space-y-1">
-                                        <div className="flex items-center gap-2">
-                                            <p className="text-xs font-medium text-zinc-400 uppercase tracking-wide">This month so far</p>
-                                            {isOnTrial && !currentPlan && <StatusBadge variant="indigo">Trial</StatusBadge>}
-                                            {trialEnded && !currentPlan && <StatusBadge variant="red">Trial expired</StatusBadge>}
-                                            {currentPlan && subscription?.on_grace_period && <StatusBadge variant="yellow">Cancelling</StatusBadge>}
-                                            {currentPlan && !subscription?.on_grace_period && <StatusBadge variant="green">Active</StatusBadge>}
-                                        </div>
+                                        <p className="text-xs font-medium text-zinc-400 uppercase tracking-wide">This month so far</p>
 
-                                        {projected_month_revenue !== null && current_month_revenue > 0 ? (
+                                        {current_month_revenue > 0 ? (
                                             <>
-                                                <p className="mt-1 text-base font-semibold text-zinc-900">{PLAN_LABELS[displayTier] ?? displayTier}</p>
-                                                <p className="text-xl font-semibold text-zinc-900">
-                                                    {displayCost !== null
-                                                        ? `${formatEur(displayCost)}${interval === 'annual' ? '/yr' : '/mo'}`
-                                                        : scaleRateLabel}
-                                                    <span className="ml-1.5 text-xs font-normal text-zinc-400">
-                                                        {interval === 'annual' ? 'est. billed annually' : 'est.'}
-                                                    </span>
-                                                </p>
-                                                <p className="text-xs text-zinc-400">
-                                                    {formatEur(current_month_revenue)} {billableLabel} so far · {formatEur(projected_month_revenue!)} projected · day {day_of_month} of {days_in_month}
-                                                </p>
-                                                {tierChangePending && (
-                                                    <p className="mt-1 text-xs font-medium text-yellow-600">
-                                                        Changes from {PLAN_LABELS[resolved_tier] ?? resolved_tier} to {PLAN_LABELS[effectiveTier] ?? effectiveTier} on the 1st
+                                                <p className="text-xs text-zinc-400">{billableLabel}</p>
+                                                <p className="text-base font-semibold text-zinc-900">{formatEur(current_month_revenue)}</p>
+                                                {projected_month_revenue !== null && projected_bill !== null ? (
+                                                    <>
+                                                        <p className="mt-2 text-xs text-zinc-400">Projected bill</p>
+                                                        <p className="text-xl font-semibold text-zinc-900">
+                                                            {formatEur(projected_bill)}
+                                                            <span className="ml-1.5 text-xs font-normal text-zinc-400">est.</span>
+                                                        </p>
+                                                        <p className="text-xs text-zinc-400">
+                                                            Projected {billableLabel}: {formatEur(projected_month_revenue)} · day {day_of_month} of {days_in_month}
+                                                        </p>
+                                                    </>
+                                                ) : (
+                                                    <p className="mt-1 text-xs text-zinc-400">
+                                                        Projection available from day 7 · day {day_of_month} of {days_in_month}
                                                     </p>
                                                 )}
                                             </>
                                         ) : (
-                                            <p className="mt-1 text-sm text-zinc-400">
-                                                {current_month_revenue > 0 ? `${formatEur(current_month_revenue)} so far` : '—'}
-                                            </p>
+                                            <p className="mt-1 text-sm text-zinc-400">—</p>
                                         )}
 
-                                        {!tierChangePending && billingImminent && (
+                                        {billingImminent && (
                                             <p className="mt-1 text-xs text-zinc-400">
                                                 Billing in {days_until_billing} {days_until_billing === 1 ? 'day' : 'days'}
                                             </p>
                                         )}
                                     </div>
                                 </div>
+                                )}
 
                                 {/* Upcoming invoice */}
                                 {upcoming_invoice && (
@@ -653,52 +624,6 @@ export default function Billing({
                                             <p className="text-sm text-red-600">Your trial has ended. Subscribe to continue using Nexstage.</p>
                                         )}
 
-                                        {/* Tier reference table */}
-                                        <div className="rounded-lg border border-zinc-100 bg-zinc-50 px-4 py-3 text-xs text-zinc-500">
-                                            <p className="mb-2 font-medium text-zinc-600">
-                                                Tier is assigned automatically based on last month's {billing_basis === 'ad_spend' ? 'ad spend' : 'GMV'}.
-                                            </p>
-                                            <div className="space-y-1">
-                                                {['starter', 'growth', 'scale'].map((tier) => (
-                                                    <div key={tier} className={`flex items-center justify-between rounded px-2 py-1 ${resolved_tier === tier ? 'bg-primary/10 font-medium text-primary' : ''}`}>
-                                                        <span>{PLAN_LABELS[tier]}</span>
-                                                        <span className="ml-4">{TIER_THRESHOLDS[tier]}</span>
-                                                        <span className="ml-4">
-                                                            {tier === 'scale'
-                                                                ? `${scaleRateLabel}, min €149/mo`
-                                                                : interval === 'annual'
-                                                                    ? `€${tier === 'starter' ? '290' : '590'}/yr`
-                                                                    : `€${tier === 'starter' ? '29' : '59'}/mo`}
-                                                        </span>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        </div>
-
-                                        {resolved_tier !== 'scale' && (
-                                            <div>
-                                                <p className="mb-2 text-xs font-medium text-zinc-500 uppercase tracking-wide">Billing interval</p>
-                                                <div className="flex w-48 rounded-md border border-zinc-200 overflow-hidden text-sm">
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => setInterval('monthly')}
-                                                        className={`flex-1 py-2 transition-colors ${interval === 'monthly' ? 'bg-zinc-900 text-white' : 'bg-white text-zinc-600 hover:bg-zinc-50'}`}
-                                                    >
-                                                        Monthly
-                                                    </button>
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => setInterval('annual')}
-                                                        className={`flex-1 py-2 transition-colors ${interval === 'annual' ? 'bg-zinc-900 text-white' : 'bg-white text-zinc-600 hover:bg-zinc-50'}`}
-                                                    >
-                                                        Annual
-                                                    </button>
-                                                </div>
-                                                {interval === 'annual' && (
-                                                    <p className="mt-1 text-xs text-green-700">Annual saves 2 months (billed yearly)</p>
-                                                )}
-                                            </div>
-                                        )}
                                         <div className="flex items-center gap-3">
                                             <button
                                                 type="button"
@@ -706,10 +631,12 @@ export default function Billing({
                                                 onClick={handleSubscribe}
                                                 className="rounded-md bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
                                             >
-                                                {subscribing ? 'Redirecting…' : 'Subscribe'}
+                                                {subscribing ? 'Redirecting…' : `Subscribe — €${plan_minimum}/mo + ${ratePct}% of ${billableLabel}`}
                                             </button>
-                                            <span className="text-xs text-zinc-400">Tier is assigned automatically and adjusts monthly.</span>
                                         </div>
+                                        <p className="text-xs text-zinc-400">
+                                            Usage-based billing. You're charged €{plan_minimum}/mo minimum plus {ratePct}% of {billableLabel} each month.
+                                        </p>
                                     </div>
                                 )}
                             </div>

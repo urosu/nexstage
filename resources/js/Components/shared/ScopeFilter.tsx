@@ -31,6 +31,23 @@ interface Props {
     integrations?: ScopeIntegration[];
     /** Show the DateRangePicker. Default: true. */
     showDatePicker?: boolean;
+    /**
+     * Active attribution model for paid destinations. When provided, a
+     * First Touch / Last Touch toggle is rendered in a third row.
+     */
+    attributionModel?: 'first_touch' | 'last_touch';
+    onAttributionModelChange?: (model: 'first_touch' | 'last_touch') => void;
+    /**
+     * When true, renders a disabled "Attribution Window: All Time" control with
+     * a tooltip. Phase 3.5 placeholder — full implementation deferred to Phase 4.
+     */
+    showAttributionWindow?: boolean;
+    /**
+     * When true, renders a disabled "Cash / Accrual" toggle.
+     * Accrual mode is deferred until attribution_last_touch.timestamp coverage is verified.
+     * See: PROGRESS.md Phase 4.1 decision — placeholder only.
+     */
+    showAccrualCash?: boolean;
 }
 
 /**
@@ -51,6 +68,10 @@ export function ScopeFilter({
     selectedIntegrationIds = [],
     integrations = [],
     showDatePicker = true,
+    attributionModel,
+    onAttributionModelChange,
+    showAttributionWindow = false,
+    showAccrualCash = false,
 }: Props) {
     const stores = (usePage<PageProps>().props.stores ?? []) as Store[];
 
@@ -107,7 +128,9 @@ export function ScopeFilter({
         applyIntegrationSelection(next.length === integrations.length ? [] : next);
     }
 
-    if (stores.length === 0 && !hasIntegrations && !showDatePicker) return null;
+    const hasAttributionRow = attributionModel !== undefined || showAttributionWindow || showAccrualCash;
+
+    if (stores.length === 0 && !hasIntegrations && !showDatePicker && !hasAttributionRow) return null;
 
     return (
         <div className="mb-6 space-y-2">
@@ -205,6 +228,65 @@ export function ScopeFilter({
                             </button>
                         );
                     })}
+                </div>
+            )}
+
+            {/* Row 3: attribution model toggle + window placeholder (paid destinations only) */}
+            {hasAttributionRow && (
+                <div className="flex flex-wrap items-center gap-3">
+                    {/* Attribution model toggle */}
+                    {attributionModel !== undefined && onAttributionModelChange && (
+                        <div className="flex items-center gap-1">
+                            <span className="text-[10px] uppercase tracking-wide text-zinc-400 mr-1">Attribution</span>
+                            {(['last_touch', 'first_touch'] as const).map((model) => (
+                                <button
+                                    key={model}
+                                    onClick={() => onAttributionModelChange(model)}
+                                    className={cn(
+                                        'rounded-full border px-3 py-1 text-xs font-medium transition-colors',
+                                        attributionModel === model
+                                            ? 'border-primary bg-primary/10 text-primary'
+                                            : 'border-zinc-200 bg-white text-zinc-600 hover:border-zinc-300',
+                                    )}
+                                >
+                                    {model === 'last_touch' ? 'Last Touch' : 'First Touch'}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+
+                    {/* Attribution window — placeholder, full implementation deferred */}
+                    {showAttributionWindow && (
+                        <div
+                            className="flex items-center gap-1.5 rounded-full border border-zinc-200 bg-zinc-50 px-3 py-1 text-xs text-zinc-400 cursor-not-allowed select-none"
+                            title="Attribution window filtering coming in a future update"
+                        >
+                            Window: All Time
+                        </div>
+                    )}
+
+                    {/* Accrual / Cash toggle — placeholder per Phase 4.1 decision */}
+                    {showAccrualCash && (
+                        <div
+                            className="flex items-center gap-1 cursor-not-allowed select-none"
+                            title="Accrual mode coming once attribution coverage is verified."
+                        >
+                            <span className="text-[10px] uppercase tracking-wide text-zinc-400 mr-1">Mode</span>
+                            {(['Cash', 'Accrual'] as const).map((mode) => (
+                                <div
+                                    key={mode}
+                                    className={cn(
+                                        'rounded-full border px-3 py-1 text-xs font-medium',
+                                        mode === 'Cash'
+                                            ? 'border-zinc-300 bg-zinc-100 text-zinc-500'
+                                            : 'border-zinc-200 bg-white text-zinc-300',
+                                    )}
+                                >
+                                    {mode}
+                                </div>
+                            ))}
+                        </div>
+                    )}
                 </div>
             )}
         </div>

@@ -28,7 +28,7 @@ class WorkspaceSeeder extends Seeder
             'reporting_currency' => 'EUR',
             'reporting_timezone' => 'Europe/Berlin',
             'trial_ends_at'      => null,
-            'billing_plan'       => 'growth',
+            'billing_plan'       => 'standard',
             // Integration flags reflect what StoreSeeder/AdSeeder/SearchConsoleSeeder connect below
             'has_store'          => true,
             'has_ads'            => true,

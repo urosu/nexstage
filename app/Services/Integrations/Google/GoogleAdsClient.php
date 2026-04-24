@@ -9,6 +9,7 @@ use App\Exceptions\GoogleApiException;
 use App\Exceptions\GoogleRateLimitException;
 use App\Exceptions\GoogleTokenExpiredException;
 use App\Models\AdAccount;
+use Illuminate\Http\Client\Pool;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
@@ -254,6 +255,129 @@ class GoogleAdsClient
         }
 
         // Each element may have a 'results' key (array of row objects)
+        foreach ($decoded as $batch) {
+            if (isset($batch['results']) && is_array($batch['results'])) {
+                foreach ($batch['results'] as $row) {
+                    $rows[] = $row;
+                }
+            }
+        }
+
+        return $rows;
+    }
+
+    /**
+     * Fire multiple GAQL queries concurrently across different customer IDs.
+     *
+     * Each request is independent and safe to parallelize per Google's rate-limit
+     * model: limits are enforced per customer ID + per developer token independently.
+     * Uses Laravel's Http::pool which multiplexes over HTTP/2 to stay well under
+     * rate limits while maximizing throughput.
+     *
+     * @param  array<string, array{customerId: string, gaql: string}> $requests
+     * @return array<string, list<array<string, mixed>>> Rows keyed by the same key as $requests.
+     *
+     * @throws GoogleTokenExpiredException
+     * @throws GoogleRateLimitException
+     * @throws GoogleApiException
+     */
+    public function searchStreamPool(array $requests): array
+    {
+        if ($requests === []) {
+            return [];
+        }
+
+        $token   = $this->currentAccessToken;
+        $headers = $this->buildHeaders();
+
+        /** @var array<string, \Illuminate\Http\Client\Response> $responses */
+        $responses = Http::pool(static function (Pool $pool) use ($requests, $token, $headers): array {
+            $promises = [];
+
+            foreach ($requests as $key => $req) {
+                $url = self::ADS_API_BASE . "/customers/{$req['customerId']}/googleAds:searchStream";
+                $promises[] = $pool->as((string) $key)
+                    ->withHeaders($headers)
+                    ->timeout(60)
+                    ->connectTimeout(10)
+                    ->retry(2, 500, throw: false)
+                    ->post($url, ['query' => $req['gaql']]);
+            }
+
+            return $promises;
+        });
+
+        // First pass: detect token expiry / rate limits across the whole batch
+        $maxRetryAfter = 0;
+        $rateLimited   = false;
+
+        foreach ($responses as $response) {
+            if ($response instanceof \Throwable) {
+                throw new GoogleApiException('Google Ads pool transport error: ' . $response->getMessage());
+            }
+
+            $status  = $response->status();
+            $gStatus = $response->json('error.status', '');
+
+            if ($status === 401 || $gStatus === 'UNAUTHENTICATED') {
+                throw new GoogleTokenExpiredException();
+            }
+
+            if ($status === 429 || $gStatus === 'RESOURCE_EXHAUSTED') {
+                $rateLimited   = true;
+                $maxRetryAfter = max($maxRetryAfter, (int) $response->header('Retry-After', 60) ?: 60);
+            }
+        }
+
+        if ($rateLimited) {
+            Cache::put('google_ads_throttled_until', now()->addSeconds($maxRetryAfter)->toISOString(), $maxRetryAfter + 60);
+            Cache::put('google_ads_last_throttle_at', now()->toISOString(), 86400);
+            $hitKey = 'google_ads_rate_limit_hits_' . now()->toDateString();
+            Cache::add($hitKey, 0, 172800);
+            Cache::increment($hitKey);
+
+            throw new GoogleRateLimitException($maxRetryAfter);
+        }
+
+        $out        = [];
+        $successful = 0;
+
+        foreach ($responses as $key => $response) {
+            if (! $response->successful()) {
+                $status = $response->status();
+                $reason = $response->json('error.message', "HTTP {$status}");
+                throw new GoogleApiException("Google Ads API error ({$status}) for customer {$key}: {$reason}");
+            }
+
+            $successful++;
+            $out[(string) $key] = $this->parseStreamResults($response->json());
+        }
+
+        // Record successful calls for admin quota visibility.
+        if ($successful > 0) {
+            Cache::put('google_ads_last_success_at', now()->toISOString(), 86400);
+            $callKey = 'google_ads_calls_' . now()->toDateString();
+            Cache::add($callKey, 0, 172800);
+            Cache::increment($callKey, $successful);
+        }
+
+        return $out;
+    }
+
+    /**
+     * Parse the nested results array from a searchStream response.
+     *
+     * @param  mixed  $decoded
+     * @return list<array<string, mixed>>
+     */
+    private function parseStreamResults($decoded): array
+    {
+        if (! is_array($decoded)) {
+            return [];
+        }
+
+        $rows = [];
+
         foreach ($decoded as $batch) {
             if (isset($batch['results']) && is_array($batch['results'])) {
                 foreach ($batch['results'] as $row) {

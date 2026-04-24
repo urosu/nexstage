@@ -21,20 +21,16 @@ import {
     Puzzle,
     Check,
     ShieldCheck,
-    Search,
     ChevronRight,
     Building2,
     ScrollText,
     ListOrdered,
     Bug,
     FileCode2,
-    Globe,
     Gauge,
-    GitCompareArrows,
     Layers,
     Settings,
     Tag,
-    Trophy,
     Activity,
     ShieldAlert,
     GitBranch,
@@ -44,7 +40,7 @@ import {
 import { ReactNode, useEffect, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { wurl } from '@/lib/workspace-url';
-import { PageProps, Store as StoreType, Workspace } from '@/types';
+import { PageProps, Workspace } from '@/types';
 
 // ─── Nav config types ─────────────────────────────────────────────────────────
 
@@ -359,7 +355,7 @@ function UserMenu({
 // ─── Alert bell ───────────────────────────────────────────────────────────────
 
 function AlertBell({ count, workspaceSlug }: { count: number; workspaceSlug: string | undefined }) {
-    const href = wurl(workspaceSlug, '/insights');
+    const href = wurl(workspaceSlug, '/inbox');
     return (
         <Link href={href} className="relative flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 transition-colors" title="Alerts">
             <Bell className="h-4 w-4" />
@@ -386,36 +382,38 @@ function SectionLabel({ label }: { label: string }) {
 function Sidebar({
     workspace,
     workspaces,
-    stores,
     onClose,
 }: {
     workspace: Workspace | undefined;
     workspaces: Workspace[] | undefined;
-    stores: StoreType[];
     onClose?: () => void;
 }) {
     const pathname = typeof window !== 'undefined' ? window.location.pathname : '';
     const slug = workspace?.slug;
     const w = (path: string) => wurl(slug, path);
 
-    // Stores group: "All Stores" + individual store links
-    const storesGroup: NavGroup = {
+    // Manage group — tools & store management
+    const manageGroup: NavGroup = {
         type: 'group',
-        key: 'stores',
-        label: 'Stores',
-        icon: Store,
-        basePaths: [w('/stores')],
+        key: 'manage',
+        label: 'Manage',
+        icon: Settings,
+        basePaths: [w('/manage'), w('/stores'), w('/holidays')],
         children: [
-            { label: 'All Stores', href: w('/stores'), exact: true },
-            ...stores.map((s) => ({ label: s.name, href: w(`/stores/${s.slug}/overview`) })),
+            { label: 'Tag Generator',     href: w('/manage/tag-generator'),     icon: Tag },
+            { label: 'Channel Mappings',  href: w('/manage/channel-mappings'),  icon: GitBranch },
+            { label: 'Naming Convention', href: w('/manage/naming-convention'), icon: FileCode2 },
+            { label: 'Product Costs',     href: w('/manage/product-costs'),     icon: DollarSign },
+            { label: 'Stores',            href: w('/stores'),                   icon: Store },
+            { label: 'Holidays',          href: w('/holidays'),                 icon: CalendarDays },
         ],
     };
 
-    const isStoresOpen = matchesPath(pathname, [w('/stores')]);
-    const [storesOpen, setStoresOpen] = useState(isStoresOpen);
+    const isManageOpen = matchesPath(pathname, manageGroup.basePaths);
+    const [manageOpen, setManageOpen] = useState(isManageOpen);
 
     useEffect(() => {
-        setStoresOpen(matchesPath(pathname, [w('/stores')]));
+        setManageOpen(matchesPath(pathname, manageGroup.basePaths));
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [pathname]);
 
@@ -423,7 +421,7 @@ function Sidebar({
         <aside className="flex h-full w-[220px] flex-col border-r border-zinc-200 bg-white">
             {/* Logo */}
             <div className="flex h-14 shrink-0 items-center justify-between border-b border-zinc-100 px-4">
-                <Link href={w('/dashboard')} className="text-lg font-bold text-zinc-900 tracking-tight">
+                <Link href={w('')} className="text-lg font-bold text-zinc-900 tracking-tight">
                     Nexstage
                 </Link>
                 {onClose && (
@@ -433,96 +431,55 @@ function Sidebar({
                 )}
             </div>
 
-            {/* Main nav */}
+            {/* Main nav — 8 destinations */}
             <nav className="flex-1 overflow-y-auto px-3 py-3">
-                {/* Overview — always visible */}
-                <SidebarLink
-                    item={{ label: 'Overview', href: w('/dashboard'), icon: LayoutDashboard, exact: true }}
-                    onClick={onClose}
-                />
-
-                {/* Performance */}
-                <SectionLabel label="Performance" />
                 <div className="space-y-0.5">
+                    {/* 1. Home */}
                     <SidebarLink
-                        item={{
-                            label: 'Acquisition',
-                            href: w('/acquisition'),
-                            icon: Layers,
-                        }}
+                        item={{ label: 'Home', href: w(''), icon: LayoutDashboard, exact: true }}
                         onClick={onClose}
                     />
+                    {/* 2. Acquisition */}
                     <SidebarLink
-                        item={{
-                            label: 'Paid Ads',
-                            href: w('/campaigns'),
-                            icon: BarChart2,
-                            indicator: !(workspace?.has_ads ?? false),
-                        }}
+                        item={{ label: 'Acquisition', href: w('/acquisition'), icon: Layers }}
                         onClick={onClose}
                     />
+                    {/* 3. Campaigns & Creatives */}
                     <SidebarLink
-                        item={{
-                            label: 'Organic Search',
-                            href: w('/seo'),
-                            icon: TrendingUp,
-                            indicator: !(workspace?.has_gsc ?? false),
-                        }}
+                        item={{ label: 'Campaigns & Creatives', href: w('/campaigns'), icon: BarChart2, indicator: !(workspace?.has_ads ?? false) }}
                         onClick={onClose}
                     />
+                    {/* 4. Organic */}
                     <SidebarLink
-                        item={{
-                            label: 'Site Performance',
-                            href: w('/performance'),
-                            icon: Gauge,
-                            indicator: !(workspace?.has_psi ?? false),
-                        }}
+                        item={{ label: 'Organic', href: w('/seo'), icon: TrendingUp, indicator: !(workspace?.has_gsc ?? false) }}
+                        onClick={onClose}
+                    />
+                    {/* 5. Performance */}
+                    <SidebarLink
+                        item={{ label: 'Performance', href: w('/performance'), icon: Gauge, indicator: !(workspace?.has_psi ?? false) }}
+                        onClick={onClose}
+                    />
+                    {/* 6. Store */}
+                    <SidebarLink
+                        item={{ label: 'Store', href: w('/store'), icon: Store }}
                         onClick={onClose}
                     />
                 </div>
 
-                {/* Reports */}
-                <SectionLabel label="Reports" />
-                <div className="space-y-0.5">
-                    <SidebarLink item={{ label: 'Discrepancy',     href: w('/analytics/discrepancy'), icon: GitCompareArrows }} onClick={onClose} />
-                    <SidebarLink item={{ label: 'Daily Breakdown', href: w('/analytics/daily'),    icon: CalendarDays }} onClick={onClose} />
-                    <SidebarLink item={{ label: 'By Country',      href: w('/countries'),           icon: Globe }}    onClick={onClose} />
-                    <SidebarLink item={{ label: 'By Product',      href: w('/analytics/products'), icon: Search }}   onClick={onClose} />
-                    <SidebarLink item={{ label: 'Winners & Losers', href: w('/analytics/winners'), icon: Trophy }} onClick={onClose} />
-                </div>
-
-                {/* Stores */}
-                <SectionLabel label="Stores" />
-                <div className="space-y-0.5">
+                <div className="mt-3 space-y-0.5">
+                    {/* 7. Inbox */}
+                    <SidebarLink
+                        item={{ label: 'Inbox', href: w('/inbox'), icon: Lightbulb }}
+                        onClick={onClose}
+                    />
+                    {/* 8. Manage */}
                     <SidebarGroupItem
-                        group={storesGroup}
-                        isOpen={storesOpen}
-                        onToggle={() => {
-                            if (!isStoresOpen) setStoresOpen((v) => !v);
-                        }}
+                        group={manageGroup}
+                        isOpen={manageOpen}
+                        onToggle={() => setManageOpen((v) => !v)}
                         onClick={onClose}
                     />
                 </div>
-
-                {/* Insights — always visible */}
-                <div className="mt-0.5">
-                    <SidebarLink item={{ label: 'Insights', href: w('/insights'), icon: Lightbulb }} onClick={onClose} />
-                </div>
-
-                {/* Tools — shown when store or ads connected */}
-                {(workspace?.has_store || workspace?.has_ads) && (
-                    <>
-                        <SectionLabel label="Tools" />
-                        <div className="space-y-0.5">
-                            <SidebarLink item={{ label: 'Tag Generator', href: w('/manage/tag-generator'), icon: Tag }} onClick={onClose} />
-                            <SidebarLink item={{ label: 'Naming Convention', href: w('/manage/naming-convention'), icon: FileCode2 }} onClick={onClose} />
-                            <SidebarLink item={{ label: 'Channel Mappings', href: w('/manage/channel-mappings'), icon: GitBranch }} onClick={onClose} />
-                            <SidebarLink item={{ label: 'Product Costs', href: w('/manage/product-costs'), icon: DollarSign }} onClick={onClose} />
-                            <SidebarLink item={{ label: 'Holidays', href: w('/holidays'), icon: CalendarDays }} onClick={onClose} />
-                        </div>
-                    </>
-                )}
-
             </nav>
 
             {/* Workspace switcher */}
@@ -610,7 +567,6 @@ export default function AppLayout({ children, topBarRight, dateRangePicker }: Ap
                 <Sidebar
                     workspace={workspace}
                     workspaces={workspaces}
-                    stores={stores ?? []}
                     onClose={() => setSidebarOpen(false)}
                 />
             </div>

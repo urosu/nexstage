@@ -1,39 +1,33 @@
-import { useEffect, useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Head, router, usePage } from '@inertiajs/react';
 
 // Why: When Inertia swaps components via flushSync mid-navigation, the new component
 // initialises with useState(false) and renders stale cached data before the real server
-// response arrives. Tracking navigation state at module level lets us start with
-// navigating=true so the skeleton stays visible until the real data is ready.
+// response arrives. Tracking navigation state at module level keeps the skeleton visible.
 let _inertiaNavigating = false;
 router.on('start',  () => { _inertiaNavigating = true; });
 router.on('finish', () => { _inertiaNavigating = false; });
 
 import { Layers } from 'lucide-react';
 import AppLayout from '@/Components/layouts/AppLayout';
-import { DateRangePicker } from '@/Components/shared/DateRangePicker';
 import { PageHeader } from '@/Components/shared/PageHeader';
-import { StoreFilter } from '@/Components/shared/StoreFilter';
+import { ScopeFilter } from '@/Components/shared/ScopeFilter';
+import { DestinationTabs } from '@/Components/shared/DestinationTabs';
 import { MetricCard } from '@/Components/shared/MetricCard';
-import { formatCurrency, formatNumber } from '@/lib/formatters';
+import { ChannelMatrix } from '@/Components/shared/ChannelMatrix';
+import { PlatformVsRealTable } from '@/Components/shared/PlatformVsRealTable';
+import { JourneyTimeline } from '@/Components/shared/JourneyTimeline';
+import { OpportunitiesSidebar } from '@/Components/shared/OpportunitiesSidebar';
+import { formatCurrency, formatNumber, formatDateOnly } from '@/lib/formatters';
 import { cn } from '@/lib/utils';
+import { wurl } from '@/lib/workspace-url';
 import type { PageProps } from '@/types';
+import type { ChannelMatrixRow } from '@/Components/shared/ChannelMatrix';
+import type { CampaignDiscrepancyRow, DiscrepancyChartPoint, DiscrepancyHero } from '@/Components/shared/PlatformVsRealTable';
+import type { JourneyOrder } from '@/Components/shared/JourneyTimeline';
+import type { OpportunityItem } from '@/Components/shared/OpportunitiesSidebar';
 
-// ── Types ────────────────────────────────────────────────────────────────────
-
-interface ChannelRow {
-    channel_type: string;
-    channel_name: string;
-    clicks: number | null;
-    orders: number;
-    cvr: number | null;
-    revenue: number;
-    ad_spend: number | null;
-    total_cogs: number | null;
-    contribution_margin: number | null;
-    real_profit: number | null;
-    wl_tag: 'winner' | 'loser' | null;
-}
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 interface HeroMetrics {
     total_orders: number;
@@ -45,8 +39,20 @@ interface HeroMetrics {
     coverage_pct: number | null;
 }
 
+interface DiscrepancyData {
+    campaigns: CampaignDiscrepancyRow[];
+    chart_data: DiscrepancyChartPoint[];
+    hero: DiscrepancyHero;
+    platform: string;
+}
+
+interface JourneyData {
+    orders: JourneyOrder[];
+    filter: string;
+}
+
 interface Props {
-    channels: ChannelRow[];
+    channels: ChannelMatrixRow[];
     channels_total_count: number;
     has_cogs: boolean;
     hero: HeroMetrics;
@@ -58,62 +64,54 @@ interface Props {
     view: string;
     filter: string;
     classifier: string;
+    narrative: string | null;
+    // Phase 3.5 additions
+    tab: string;
+    attribution_model: 'first_touch' | 'last_touch';
+    discrepancy: DiscrepancyData;
+    journeys: JourneyData;
+    opportunities: OpportunityItem[];
 }
 
-// ── Channel display helpers ─────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-const CHANNEL_TYPE_LABELS: Record<string, string> = {
-    paid_social:    'Paid Social',
-    paid_search:    'Paid Search',
-    organic_search: 'Organic Search',
-    organic_social: 'Social',
-    email:          'Email',
-    sms:            'SMS',
-    affiliate:      'Affiliate',
-    referral:       'Referral',
-    direct:         'Direct',
-    other:          'Other Tagged',
-    not_tracked:    'Not Tracked',
-};
-
-const CHANNEL_TYPE_COLORS: Record<string, string> = {
-    paid_social:    '#3b82f6',
-    paid_search:    '#8b5cf6',
-    organic_search: '#16a34a',
-    organic_social: '#ec4899',
-    email:          '#f59e0b',
-    sms:            '#06b6d4',
-    affiliate:      '#f97316',
-    referral:       '#64748b',
-    direct:         '#a1a1aa',
-    other:          '#78716c',
-    not_tracked:    '#d4d4d8',
-};
-
-function channelLabel(row: ChannelRow): string {
-    if (row.channel_name && row.channel_name !== 'Not Tracked') {
-        return row.channel_name;
-    }
-    return CHANNEL_TYPE_LABELS[row.channel_type] ?? row.channel_type;
-}
-
-function StatCell({ label, value, colorClass }: { label: string; value: string; colorClass?: string }) {
+function JourneyFilterPill({
+    label,
+    active,
+    onClick,
+}: {
+    label: string;
+    active: boolean;
+    onClick: () => void;
+}) {
     return (
-        <div className="flex-1 px-3 py-3 text-right">
-            <div className="text-[10px] uppercase tracking-wide text-zinc-400">{label}</div>
-            <div className={cn('text-sm font-medium tabular-nums text-zinc-700', colorClass)}>{value}</div>
-        </div>
+        <button
+            onClick={onClick}
+            className={cn(
+                'rounded-full border px-3 py-1 text-xs font-medium transition-colors',
+                active
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-zinc-200 bg-white text-zinc-600 hover:border-zinc-300',
+            )}
+        >
+            {label}
+        </button>
     );
 }
 
-// ── Main page ───────────────────────────────────────────────────────────────
+// ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function Acquisition(props: Props) {
     const { workspace } = usePage<PageProps>().props;
     const currency = workspace?.reporting_currency ?? 'EUR';
     const [navigating, setNavigating] = useState(() => _inertiaNavigating);
+    const [selectedOrder, setSelectedOrder] = useState<JourneyOrder | null>(null);
 
-    const { channels, hero, store_ids } = props;
+    const {
+        channels, hero, store_ids, narrative,
+        tab, attribution_model, discrepancy, journeys, opportunities,
+        from, to, filter,
+    } = props;
 
     useEffect(() => {
         const off1 = router.on('start',  () => setNavigating(true));
@@ -121,13 +119,63 @@ export default function Acquisition(props: Props) {
         return () => { off1(); off2(); };
     }, []);
 
-    // ── Empty state ─────────────────────────────────────────────────────────
-    if (!navigating && channels.length === 0) {
+    // ── Navigation helpers ───────────────────────────────────────────────────
+
+    function navigate(patch: Record<string, string | null | undefined>): void {
+        const params = new URLSearchParams(window.location.search);
+        params.delete('page');
+        for (const [key, value] of Object.entries(patch)) {
+            if (value === null || value === undefined || value === '') {
+                params.delete(key);
+            } else {
+                params.set(key, value);
+            }
+        }
+        router.get(
+            wurl(workspace?.slug, '/acquisition'),
+            Object.fromEntries(params) as Record<string, string>,
+            { preserveScroll: true, replace: true },
+        );
+    }
+
+    function handleAttributionModelChange(model: 'first_touch' | 'last_touch') {
+        navigate({ attribution_model: model });
+    }
+
+    function handlePlatformChange(p: string) {
+        navigate({ platform: p !== 'all' ? p : null, tab: 'platform-vs-real' });
+    }
+
+    function handleJourneyFilter(f: string) {
+        navigate({ journey_filter: f !== 'all' ? f : null, tab: 'journeys' });
+    }
+
+    // ── Tab definitions ──────────────────────────────────────────────────────
+
+    const baseUrl = wurl(workspace?.slug, '/acquisition');
+    const commonParams = new URLSearchParams({ from, to });
+    if (attribution_model !== 'last_touch') commonParams.set('attribution_model', attribution_model);
+
+    const tabs = [
+        { key: 'channels',         label: 'Channels',         href: `${baseUrl}?${new URLSearchParams({ ...Object.fromEntries(commonParams), tab: 'channels' })}` },
+        { key: 'platform-vs-real', label: 'Platform vs Real', href: `${baseUrl}?${new URLSearchParams({ ...Object.fromEntries(commonParams), tab: 'platform-vs-real' })}` },
+        { key: 'journeys',         label: 'Customer Journeys',href: `${baseUrl}?${new URLSearchParams({ ...Object.fromEntries(commonParams), tab: 'journeys' })}` },
+    ];
+
+    // ── Empty state ──────────────────────────────────────────────────────────
+
+    if (!navigating && channels.length === 0 && tab === 'channels') {
         return (
-            <AppLayout dateRangePicker={<DateRangePicker />}>
+            <AppLayout>
                 <Head title="Acquisition" />
-                <PageHeader title="Acquisition" subtitle="Traffic sources that bring orders" />
-                <StoreFilter selectedStoreIds={store_ids} />
+                <PageHeader title="Acquisition" subtitle="Traffic sources that bring orders" narrative={narrative} />
+                <ScopeFilter
+                    selectedStoreIds={store_ids}
+                    attributionModel={attribution_model}
+                    onAttributionModelChange={handleAttributionModelChange}
+                    showAttributionWindow
+                />
+                <DestinationTabs tabs={tabs} activeKey={tab} />
                 <div className="flex flex-col items-center justify-center rounded-xl border border-zinc-200 bg-white px-6 py-20 text-center">
                     <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-zinc-100">
                         <Layers className="h-6 w-6 text-zinc-400" />
@@ -142,15 +190,25 @@ export default function Acquisition(props: Props) {
         );
     }
 
-    const total = channels.reduce((s, c) => s + c.revenue, 0);
-
     return (
-        <AppLayout dateRangePicker={<DateRangePicker />}>
+        <AppLayout>
             <Head title="Acquisition" />
-            <PageHeader title="Acquisition" subtitle="Which traffic sources bring me orders, not just visitors?" />
-            <StoreFilter selectedStoreIds={store_ids} />
+            <PageHeader
+                title="Acquisition"
+                subtitle="Which traffic sources bring me orders, not just visitors?"
+                narrative={narrative}
+            />
 
-            {/* ── Hero cards ─────────────────────────────────────────────────── */}
+            <ScopeFilter
+                selectedStoreIds={store_ids}
+                attributionModel={attribution_model}
+                onAttributionModelChange={handleAttributionModelChange}
+                showAttributionWindow
+            />
+
+            <DestinationTabs tabs={tabs} activeKey={tab} />
+
+            {/* ── Hero cards (shown on all tabs) ───────────────────────────── */}
             <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-5">
                 <MetricCard
                     label="Total Orders"
@@ -179,7 +237,7 @@ export default function Acquisition(props: Props) {
                     source="real"
                     value={formatCurrency(hero.total_profit, currency)}
                     loading={navigating}
-                    tooltip="Revenue minus COGS minus ad spend across all channels."
+                    tooltip="Revenue minus COGS, payment fees, shipping, and ad spend across all channels."
                 />
                 <MetricCard
                     label="Attribution Coverage"
@@ -187,80 +245,144 @@ export default function Acquisition(props: Props) {
                     value={hero.coverage_pct != null ? `${hero.coverage_pct}%` : 'N/A'}
                     subtext={`${hero.attributed_orders} of ${hero.total_orders} orders`}
                     loading={navigating}
-                    tooltip="Orders attributed to a known marketing channel. Direct counts as attributed — it means PYS detected no referrer source (bookmark, type-in). Only 'Not Tracked' orders (no PYS data) lower this number."
+                    tooltip="Orders attributed to a known marketing channel. Direct counts as attributed."
                 />
             </div>
 
-            {/* ── Channels: bar + full stats ──────────────────────────────────── */}
-            {channels.length > 0 && (
-                <div className="rounded-xl border border-zinc-200 bg-white divide-y divide-zinc-100">
-                    {/* header row */}
-                    <div className="flex items-center text-[10px] uppercase tracking-wide text-zinc-400">
-                        <div className="flex-1 px-4 py-2">Channel</div>
-                        <div className="flex flex-[1] shrink-0 border-l border-zinc-100 divide-x divide-zinc-100">
-                            <div className="flex-1 px-3 py-2 text-right">Clicks</div>
-                            <div className="flex-1 px-3 py-2 text-right">Orders</div>
-                            <div className="flex-1 px-3 py-2 text-right">CVR</div>
-                            <div className="flex-1 px-3 py-2 text-right">Revenue</div>
-                            <div className="flex-1 px-3 py-2 text-right">Real Profit</div>
-                        </div>
-                    </div>
-                    {channels.map((ch, i) => {
-                        const pct   = total > 0 ? Math.round((ch.revenue / total) * 1000) / 10 : 0;
-                        const color = CHANNEL_TYPE_COLORS[ch.channel_type] ?? '#a1a1aa';
-                        const profitClass = ch.real_profit != null
-                            ? ch.real_profit >= 0 ? 'text-green-700' : 'text-red-600'
-                            : undefined;
-                        return (
-                            <div key={`${ch.channel_type}-${ch.channel_name}`} className="flex items-center hover:bg-zinc-50 transition-colors">
-                                {/* 2/3 — bar */}
-                                <div className="flex flex-1 items-center gap-3 px-4 py-3 min-w-0">
-                                    <span className="w-5 shrink-0 text-xs text-zinc-300 font-medium text-right">{i + 1}</span>
-                                    <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
-                                    <div className="flex-1 min-w-0">
-                                        <div className="flex items-center gap-1.5">
-                                            <span className="text-sm text-zinc-800 font-medium">{channelLabel(ch)}</span>
-                                            {ch.wl_tag === 'winner' && (
-                                                <span className="rounded-full bg-green-50 px-1.5 py-0.5 text-[10px] font-medium text-green-700 border border-green-200">W</span>
-                                            )}
-                                            {ch.wl_tag === 'loser' && (
-                                                <span className="rounded-full bg-red-50 px-1.5 py-0.5 text-[10px] font-medium text-red-600 border border-red-200">L</span>
-                                            )}
-                                        </div>
-                                        <div className="mt-1 h-1.5 w-full rounded-full bg-zinc-100">
-                                            <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: color }} />
-                                        </div>
-                                    </div>
-                                    <span className="shrink-0 text-xs text-zinc-400 tabular-nums">{pct}%</span>
-                                </div>
-                                {/* 1/3 — stats */}
-                                <div className="flex flex-[1] shrink-0 border-l border-zinc-100 divide-x divide-zinc-100">
-                                    <StatCell
-                                        label="Clicks"
-                                        value={ch.clicks != null ? formatNumber(ch.clicks) : '—'}
-                                    />
-                                    <StatCell
-                                        label="Orders"
-                                        value={formatNumber(ch.orders)}
-                                    />
-                                    <StatCell
-                                        label="CVR"
-                                        value={ch.cvr != null ? `${ch.cvr}%` : '—'}
-                                    />
-                                    <StatCell
-                                        label="Revenue"
-                                        value={formatCurrency(ch.revenue, currency, true)}
-                                    />
-                                    <StatCell
-                                        label="Real Profit"
-                                        value={ch.real_profit != null ? formatCurrency(ch.real_profit, currency, true) : '—'}
-                                        colorClass={profitClass}
-                                    />
-                                </div>
+            {/* ── Two-column layout: tab content + opportunities sidebar ──── */}
+            <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
+                <div className="flex-1 min-w-0">
+
+                    {/* Tab 1 — Channels */}
+                    {tab === 'channels' && (
+                        <ChannelMatrix
+                            rows={channels}
+                            currency={currency}
+                            loading={navigating}
+                            attributionModel={attribution_model}
+                        />
+                    )}
+
+                    {/* Tab 2 — Platform vs Real */}
+                    {tab === 'platform-vs-real' && (
+                        <PlatformVsRealTable
+                            campaigns={discrepancy.campaigns}
+                            chartData={discrepancy.chart_data}
+                            hero={discrepancy.hero}
+                            currency={currency}
+                            platform={discrepancy.platform}
+                            onPlatformChange={handlePlatformChange}
+                            loading={navigating}
+                            attributionModel={attribution_model}
+                        />
+                    )}
+
+                    {/* Tab 3 — Customer Journeys */}
+                    {tab === 'journeys' && (
+                        <div className="space-y-4">
+                            {/* Filter chips */}
+                            <div className="flex items-center gap-2">
+                                <JourneyFilterPill
+                                    label="All"
+                                    active={journeys.filter === 'all'}
+                                    onClick={() => handleJourneyFilter('all')}
+                                />
+                                <JourneyFilterPill
+                                    label="New customers"
+                                    active={journeys.filter === 'new_customers'}
+                                    onClick={() => handleJourneyFilter('new_customers')}
+                                />
+                                <JourneyFilterPill
+                                    label="High value"
+                                    active={journeys.filter === 'high_ltv'}
+                                    onClick={() => handleJourneyFilter('high_ltv')}
+                                />
                             </div>
-                        );
-                    })}
+
+                            {/* Journey order list */}
+                            {journeys.orders.length === 0 ? (
+                                <div className="flex flex-col items-center justify-center rounded-xl border border-zinc-200 bg-white px-6 py-16 text-center">
+                                    <p className="text-sm text-zinc-500">No orders found for this filter and period.</p>
+                                </div>
+                            ) : (
+                                <div className="rounded-xl border border-zinc-200 bg-white overflow-x-auto">
+                                    <table className="w-full text-sm">
+                                        <thead>
+                                            <tr className="border-b border-zinc-100">
+                                                <th className="px-5 py-3 text-left text-[10px] font-medium uppercase tracking-wide text-zinc-400">Customer</th>
+                                                <th className="px-3 py-3 text-right text-[10px] font-medium uppercase tracking-wide text-zinc-400">Revenue</th>
+                                                <th className="px-3 py-3 text-left text-[10px] font-medium uppercase tracking-wide text-zinc-400">First Touch</th>
+                                                <th className="px-3 py-3 text-left text-[10px] font-medium uppercase tracking-wide text-zinc-400">Last Touch</th>
+                                                <th className="px-3 py-3 text-right text-[10px] font-medium uppercase tracking-wide text-zinc-400">Date</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-zinc-100">
+                                            {journeys.orders.map((order) => (
+                                                <tr
+                                                    key={order.id}
+                                                    className="cursor-pointer hover:bg-zinc-50 transition-colors"
+                                                    onClick={() => setSelectedOrder(order)}
+                                                >
+                                                    <td className="px-5 py-3">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="text-xs text-zinc-600 font-mono">
+                                                                {order.customer_email_hash
+                                                                    ? `cust-${order.customer_email_hash.slice(0, 8)}…`
+                                                                    : 'anonymous'}
+                                                            </span>
+                                                            {order.is_first_for_customer && (
+                                                                <span className="rounded-full bg-green-50 px-1.5 py-0.5 text-[10px] font-medium text-green-700 border border-green-200">
+                                                                    New
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    </td>
+                                                    <td className="px-3 py-3 text-right tabular-nums font-medium text-zinc-800">
+                                                        {formatCurrency(order.revenue, currency)}
+                                                    </td>
+                                                    <td className="px-3 py-3 max-w-[160px]">
+                                                        <span className="truncate text-xs text-zinc-500 block">
+                                                            {order.attribution_first_touch?.channel
+                                                                || order.attribution_first_touch?.source
+                                                                || '—'}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-3 py-3 max-w-[160px]">
+                                                        <span className="truncate text-xs text-zinc-500 block">
+                                                            {order.attribution_last_touch?.channel
+                                                                || order.attribution_last_touch?.source
+                                                                || '—'}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-3 py-3 text-right text-xs text-zinc-400 tabular-nums">
+                                                        {formatDateOnly(order.occurred_at)}
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                        </div>
+                    )}
                 </div>
+
+                {/* Opportunities sidebar — full width on mobile, fixed-width on lg+ */}
+                <OpportunitiesSidebar
+                    items={opportunities}
+                    currency={currency}
+                    className="lg:block"
+                />
+            </div>
+
+            {/* Journey timeline modal */}
+            {selectedOrder && (
+                <JourneyTimeline
+                    order={selectedOrder}
+                    currency={currency}
+                    open={selectedOrder !== null}
+                    onClose={() => setSelectedOrder(null)}
+                />
             )}
         </AppLayout>
     );

@@ -31,6 +31,14 @@ use Illuminate\Support\Facades\Log;
  *   If no snapshot exists yet, platform_data.cogs_note is set to 'pre_snapshot'
  *   so the frontend can show an "Est." badge.
  *
+ * payment_fee (Phase 3.1):
+ *   Summed from Order.transactions[].fees[].amount when the GraphQL query includes
+ *   transactions. Falls back to 0 when transactions are not fetched.
+ *
+ * is_first_for_customer (Phase 3.1):
+ *   Same rule as WooCommerce — true when no earlier order exists for the same
+ *   workspace + customer_email_hash. Recomputed on every re-upsert.
+ *
  * Status mapping:
  *   Shopify displayFinancialStatus (ALL_CAPS enum) → our normalised status string.
  *
@@ -99,6 +107,10 @@ class UpsertShopifyOrderAction
             'customer_journey_summary' => $journeySummary,
         ]);
 
+        $customerEmailHash  = $this->hashEmail((string) ($shopifyOrder['email'] ?? ''));
+        $paymentFee         = $this->computePaymentFee($shopifyOrder);
+        $isFirstForCustomer = $this->computeIsFirstForCustomer($customerEmailHash, $store->workspace_id, $occurredAt);
+
         $orderRow = [
             'workspace_id'                => $store->workspace_id,
             'store_id'                    => $store->id,
@@ -110,11 +122,13 @@ class UpsertShopifyOrderAction
             'subtotal'                    => (float) ($shopifyOrder['subtotalPriceSet']['shopMoney']['amount'] ?? 0),
             'tax'                         => (float) ($shopifyOrder['totalTaxSet']['shopMoney']['amount'] ?? 0),
             'shipping'                    => (float) ($shopifyOrder['totalShippingPriceSet']['shopMoney']['amount'] ?? 0),
+            'payment_fee'                 => $paymentFee,
             'discount'                    => (float) ($shopifyOrder['totalDiscountsSet']['shopMoney']['amount'] ?? 0),
             'total_in_reporting_currency' => $totalInReporting,
-            'customer_email_hash'         => $this->hashEmail((string) ($shopifyOrder['email'] ?? '')),
+            'customer_email_hash'         => $customerEmailHash,
             'customer_country'            => $this->nullableString($shopifyOrder['billingAddress']['countryCode'] ?? null),
             'customer_id'                 => $this->nullableGid($shopifyOrder['customer']['id'] ?? null),
+            'is_first_for_customer'       => $isFirstForCustomer,
             'payment_method'              => $this->nullableString(($shopifyOrder['paymentGatewayNames'] ?? [])[0] ?? null),
             'payment_method_title'        => null, // Shopify doesn't expose a display name separate from gateway ID
             'shipping_country'            => $this->nullableString($shopifyOrder['shippingAddress']['countryCode'] ?? null),
@@ -136,8 +150,8 @@ class UpsertShopifyOrderAction
 
         $updateColumns = [
             'external_number', 'status', 'currency', 'total', 'subtotal',
-            'tax', 'shipping', 'discount', 'total_in_reporting_currency',
-            'customer_email_hash', 'customer_country', 'customer_id',
+            'tax', 'shipping', 'payment_fee', 'discount', 'total_in_reporting_currency',
+            'customer_email_hash', 'customer_country', 'customer_id', 'is_first_for_customer',
             'payment_method', 'shipping_country',
             'raw_meta_api_version', 'platform_data',
             'occurred_at', 'synced_at', 'updated_at',
@@ -355,7 +369,7 @@ class UpsertShopifyOrderAction
 
         foreach ($discountCodes as $dc) {
             // API 2024-01+ returns discountCodes as [String!]! — plain code strings.
-            $code = (string) $dc;
+            $code = strtolower(trim((string) $dc));
 
             if ($code === '') {
                 continue;
@@ -371,6 +385,46 @@ class UpsertShopifyOrderAction
         }
 
         return $rows;
+    }
+
+    /**
+     * Sum transaction fees from Shopify's Order.transactions[].fees[].amount.
+     *
+     * Only populated when the GraphQL query requests `transactions { fees { amount { amount } } }`.
+     * Falls back to 0 when transactions are absent from the payload.
+     *
+     * @param array<string, mixed> $shopifyOrder
+     */
+    private function computePaymentFee(array $shopifyOrder): float
+    {
+        $total = 0.0;
+
+        foreach ($shopifyOrder['transactions'] ?? [] as $transaction) {
+            foreach ($transaction['fees'] ?? [] as $fee) {
+                $total += (float) ($fee['amount']['amount'] ?? 0);
+            }
+        }
+
+        return $total;
+    }
+
+    /**
+     * Return true when no earlier order exists for this customer in this workspace.
+     *
+     * Recomputed on every re-upsert so backfilled older orders shift the "first" correctly.
+     * Orders with a NULL hash (guest checkout) are never considered "first".
+     */
+    private function computeIsFirstForCustomer(?string $customerEmailHash, int $workspaceId, Carbon $occurredAt): bool
+    {
+        if ($customerEmailHash === null) {
+            return false;
+        }
+
+        return ! DB::table('orders')
+            ->where('workspace_id', $workspaceId)
+            ->where('customer_email_hash', $customerEmailHash)
+            ->where('occurred_at', '<', $occurredAt->toDateTimeString())
+            ->exists();
     }
 
     private function mapStatus(string $shopifyStatus): string

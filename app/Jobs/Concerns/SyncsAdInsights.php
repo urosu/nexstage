@@ -178,7 +178,17 @@ trait SyncsAdInsights
         string $customerId,
     ): void {
         $rows = $client->fetchCampaigns($customerId);
+        $this->syncGoogleCampaignsFromRows($rows, $account);
+    }
 
+    /**
+     * Upsert Google Ads campaigns from pre-fetched GAQL rows.
+     * Extracted to support pooled queries where structure and insights are fetched together.
+     *
+     * @param  list<array<string, mixed>>  $rows
+     */
+    private function syncGoogleCampaignsFromRows(array $rows, AdAccount $account): void
+    {
         foreach ($rows as $row) {
             $campaign       = $row['campaign'] ?? [];
             $campaignBudget = $row['campaignBudget'] ?? [];
@@ -364,15 +374,21 @@ trait SyncsAdInsights
 
             // Build raw_insights JSONB.
             // See PLANNING.md "ad_insights.raw_insights"
-            $rawInsights = null;
-            if (isset($row['actions']) || isset($row['action_values'])) {
-                $rawInsights = array_filter([
-                    'actions'       => $row['actions'] ?? null,
-                    'action_values' => $row['action_values'] ?? null,
-                ], static fn ($v) => $v !== null);
-                if (empty($rawInsights)) {
-                    $rawInsights = null;
-                }
+            // Includes video engagement fields for Motion Score (§F11). Fields will be null for
+            // static image ads and for rows synced before video fields were added to the API request.
+            $rawInsights = array_filter([
+                'actions'                       => $row['actions']                       ?? null,
+                'action_values'                 => $row['action_values']                 ?? null,
+                'video_continuous_2_sec_watched_actions' => $row['video_continuous_2_sec_watched_actions'] ?? null,
+                'video_15_sec_watched_actions'  => $row['video_15_sec_watched_actions']  ?? null,
+                'video_p25_watched_actions'     => $row['video_p25_watched_actions']     ?? null,
+                'video_p50_watched_actions'     => $row['video_p50_watched_actions']     ?? null,
+                'video_p75_watched_actions'     => $row['video_p75_watched_actions']     ?? null,
+                'video_p100_watched_actions'    => $row['video_p100_watched_actions']    ?? null,
+                'outbound_clicks'               => $row['outbound_clicks']               ?? null,
+            ], static fn ($v) => $v !== null);
+            if (empty($rawInsights)) {
+                $rawInsights = null;
             }
 
             $batch[] = [

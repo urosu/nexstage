@@ -21,6 +21,7 @@ use App\Models\Store;
 use App\Models\SyncLog;
 use App\Models\Workspace;
 use App\Models\WorkspaceUser;
+use App\Services\Integrations\SearchConsole\GscPropertyFormatter;
 use App\Services\WorkspaceContext;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -370,7 +371,7 @@ class IntegrationsController extends Controller
 
         GscHistoricalImportJob::dispatch($property->id, $workspace->id, $syncLog->id);
 
-        return back()->with('success', "Import retry queued for {$property->property_url}.");
+        return back()->with('success', "Import retry queued for " . GscPropertyFormatter::format($property->property_url) . ".");
     }
 
     /**
@@ -492,7 +493,7 @@ class IntegrationsController extends Controller
 
         $fromLabel = $validated['from_date'] ?? 'the beginning';
 
-        return back()->with('success', "Re-import queued for {$property->property_url} from {$fromLabel}.");
+        return back()->with('success', "Re-import queued for " . GscPropertyFormatter::format($property->property_url) . " from {$fromLabel}.");
     }
 
     /**
@@ -589,6 +590,6 @@ class IntegrationsController extends Controller
             cache()->put($key, [...$current, $property->id], now()->addMinutes(5));
         }
 
-        return back()->with('success', "Sync queued for {$property->property_url}.");
+        return back()->with('success', "Sync queued for " . GscPropertyFormatter::format($property->property_url) . ".");
     }
 }

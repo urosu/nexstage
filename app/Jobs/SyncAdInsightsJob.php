@@ -213,6 +213,9 @@ class SyncAdInsightsJob implements ShouldQueue, ShouldBeUnique
 
     /**
      * Run the full Facebook Ads sync and return the number of records processed.
+     *
+     * Syncs structure on every run (fast — 3 calls) and fetches insights for all 3 levels
+     * in parallel via pool to minimize wall time.
      */
     private function syncFacebook(AdAccount $account, FxRateService $fxRates): int
     {
@@ -222,46 +225,45 @@ class SyncAdInsightsJob implements ShouldQueue, ShouldBeUnique
         $since = now()->subDays(3)->toDateString();
         $until = now()->toDateString();
 
-        // Gate structure sync to once per 23 hours.
-        // Why: campaigns/adsets/ads rarely change. Running syncStructure (3 API calls) on
-        // every hourly insights sync burns ~75% of the dev-tier rate-limit budget before
-        // any insights data is fetched. Gating to daily drops cost from 4+ calls/sync to
-        // 1 call/sync, letting us run hourly without exhausting quota.
-        // Caveat: new ads created today won't appear in insights until the next structure sync.
-        $needsStructureSync = $account->last_structure_synced_at === null
-            || $account->last_structure_synced_at->lt(now()->subHours(23));
+        // Sync structure on every run. Why: with pooled insights fetches, the structure
+        // cost (3 sequential calls) is negligible. Always syncing ensures campaigns/adsets/ads
+        // are up-to-date without stale-data caveat from hourly gating.
+        $this->syncStructure($client, $account, $this->workspaceId, includeCreative: false);
 
-        if ($needsStructureSync) {
-            // Pass includeCreative: false — creative fields are Phase 2 (correlation engine)
-            // and aren't worth the extra nested Graph API cost on every daily structure sync.
-            // The historical import's syncStructure always fetches creative.
-            $this->syncStructure($client, $account, $this->workspaceId, includeCreative: false);
-            $account->update(['last_structure_synced_at' => now()]);
-        }
-
+        // Pool all 3 insight levels in parallel (campaign, adset, ad).
+        // Reduces 3 sequential calls to 1 HTTP/2 round-trip.
         // Campaign-level: powers the Campaigns page (queries level='campaign').
+        // Adset-level: powers adset breakdowns.
         // Ad-level: powers Winners/Losers and ad-level breakdowns.
-        // Both are needed — the schema constraint (ad_insights_level_fk_check) means
-        // campaign_id IS NULL on ad rows, so you can't derive campaign totals from ad rows.
-        // filterZeroImpressions reduces pagination on accounts with many inactive ads.
-        $campaignInsights = $client->fetchInsights(
-            $account->external_id, 'campaign', $since, $until,
-            filterZeroImpressions: true,
+        // All three are needed — campaign_id IS NULL on ad rows per constraint,
+        // so you can't derive campaign totals from ad rows.
+        $insightsPool = $client->fetchInsightsPool(
+            $account->external_id,
+            [
+                'campaign' => [
+                    'level'                => 'campaign',
+                    'since'                => $since,
+                    'until'                => $until,
+                    'filterZeroImpressions' => true,
+                ],
+                'adset' => [
+                    'level'                => 'adset',
+                    'since'                => $since,
+                    'until'                => $until,
+                    'filterZeroImpressions' => true,
+                ],
+                'ad' => [
+                    'level'                => 'ad',
+                    'since'                => $since,
+                    'until'                => $until,
+                    'filterZeroImpressions' => true,
+                ],
+            ],
         );
 
-        $adsetInsights = $client->fetchInsights(
-            $account->external_id, 'adset', $since, $until,
-            filterZeroImpressions: true,
-        );
-
-        $adInsights = $client->fetchInsights(
-            $account->external_id, 'ad', $since, $until,
-            filterZeroImpressions: true,
-        );
-
-        $count  = $this->upsertInsights($campaignInsights, 'campaign', $account, $fxRates);
-        $count += $this->upsertInsights($adsetInsights, 'adset', $account, $fxRates);
-        $count += $this->upsertInsights($adInsights, 'ad', $account, $fxRates);
+        $count  = $this->upsertInsights($insightsPool['campaign'] ?? [], 'campaign', $account, $fxRates);
+        $count += $this->upsertInsights($insightsPool['adset'] ?? [], 'adset', $account, $fxRates);
+        $count += $this->upsertInsights($insightsPool['ad'] ?? [], 'ad', $account, $fxRates);
 
         return $count;
     }
@@ -269,22 +271,56 @@ class SyncAdInsightsJob implements ShouldQueue, ShouldBeUnique
     /**
      * Run the full Google Ads sync (campaign-level only; no hourly data) and
      * return the number of records processed.
+     *
+     * Batches structure and insights queries via searchStreamPool for faster execution.
      */
     private function syncGoogle(AdAccount $account, FxRateService $fxRates): int
     {
-        $client = GoogleAdsClient::forAccount($account);
-
+        $client     = GoogleAdsClient::forAccount($account);
+        $customerId = $account->external_id;
         $since      = now()->subDays(3)->toDateString();
         $until      = now()->toDateString();
-        $customerId = $account->external_id;
 
-        // Sync campaign structure
-        $this->syncGoogleCampaigns($client, $account, $customerId);
+        // Pool both structure and insights in one batch (2 GAQL queries, 1 HTTP/2 round-trip)
+        $poolRequests = [
+            'campaigns' => [
+                'customerId' => $customerId,
+                'gaql' => <<<'GAQL'
+                    SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type,
+                           campaign_budget.amount_micros, campaign_budget.period,
+                           campaign.bidding_strategy_type,
+                           campaign.target_cpa.target_cpa_micros, campaign.target_roas.target_roas
+                    FROM campaign
+                    WHERE campaign.status != 'REMOVED'
+                    GAQL,
+            ],
+            'insights' => [
+                'customerId' => $customerId,
+                'gaql' => <<<GAQL
+                    SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type,
+                           metrics.cost_micros, metrics.impressions, metrics.clicks,
+                           metrics.conversions, metrics.search_impression_share, segments.date
+                    FROM campaign
+                    WHERE segments.date BETWEEN '{$since}' AND '{$until}'
+                      AND campaign.status != 'REMOVED'
+                    GAQL,
+            ],
+        ];
 
-        // Sync campaign-level insights
-        $rows = $client->fetchCampaignInsights($customerId, $since, $until);
+        $poolResults = $client->searchStreamPool($poolRequests);
 
-        return $this->upsertGoogleInsights($rows, $account, $fxRates);
+        // Sync campaign structure from pooled results
+        if (isset($poolResults['campaigns'])) {
+            $this->syncGoogleCampaignsFromRows($poolResults['campaigns'], $account);
+        }
+
+        // Upsert insights from pooled results
+        $count = 0;
+        if (isset($poolResults['insights'])) {
+            $count = $this->upsertGoogleInsights($poolResults['insights'], $account, $fxRates);
+        }
+
+        return $count;
     }
 
 

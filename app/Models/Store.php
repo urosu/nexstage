@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Models;
 
 use App\Scopes\WorkspaceScope;
+use App\ValueObjects\StoreCostSettings;
 use Illuminate\Database\Eloquent\Attributes\ScopedBy;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -47,6 +48,7 @@ class Store extends Model
         'target_roas',
         'target_cpo',
         'target_marketing_pct',
+        'cost_settings',
     ];
 
     protected $hidden = [
@@ -69,6 +71,7 @@ class Store extends Model
             'target_roas' => 'decimal:2',
             'target_cpo' => 'decimal:2',
             'target_marketing_pct' => 'decimal:2',
+            'cost_settings' => StoreCostSettings::class,
         ];
     }
 

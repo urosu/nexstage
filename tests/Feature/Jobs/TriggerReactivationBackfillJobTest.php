@@ -41,7 +41,7 @@ class TriggerReactivationBackfillJobTest extends TestCase
 
         // Workspace that was frozen: trial expired, no billing plan yet.
         $this->workspace = Workspace::factory()->create([
-            'billing_plan'  => 'starter', // reactivated — must have a plan for the job to proceed
+            'billing_plan'  => 'standard', // reactivated — must have a plan for the job to proceed
             'trial_ends_at' => now()->subDays(5),
         ]);
 

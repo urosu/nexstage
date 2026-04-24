@@ -63,6 +63,7 @@ interface Props {
     filter: 'all' | 'winners' | 'losers';
     classifier: 'peer' | 'period' | null;
     active_classifier: 'peer' | 'period';
+    narrative: string | null;
 }
 
 // ─── Stock status badge ──────────────────────────────────────────────────────
@@ -138,6 +139,7 @@ export default function AnalyticsProducts(props: Props) {
     const {
         products, products_total_count, has_cogs, hero,
         from, to, store_ids, sort_by, sort_dir, view, filter, active_classifier,
+        narrative,
     } = props;
 
     useEffect(() => {
@@ -182,7 +184,7 @@ export default function AnalyticsProducts(props: Props) {
         return (
             <AppLayout dateRangePicker={<DateRangePicker />}>
                 <Head title="Analytics — By Product" />
-                <PageHeader title="Analytics" subtitle="Product performance" />
+                <PageHeader title="Analytics" subtitle="Product performance" narrative={narrative} />
                 <AnalyticsTabBar />
                 <StoreFilter selectedStoreIds={store_ids} />
                 <div className="flex flex-col items-center justify-center rounded-xl border border-zinc-200 bg-white px-6 py-20 text-center">

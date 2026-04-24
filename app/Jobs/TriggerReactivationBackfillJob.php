@@ -112,7 +112,7 @@ class TriggerReactivationBackfillJob implements ShouldQueue
                 'syncable_id'   => $store->id,
                 'job_type'      => WooCommerceHistoricalImportJob::class,
                 'status'        => 'queued',
-                'queue'         => 'imports',
+                'queue'         => 'imports-store',
                 'scheduled_at'  => now(),
             ]);
 
@@ -147,7 +147,7 @@ class TriggerReactivationBackfillJob implements ShouldQueue
                 'syncable_id'   => $account->id,
                 'job_type'      => AdHistoricalImportJob::class,
                 'status'        => 'queued',
-                'queue'         => 'imports',
+                'queue'         => 'imports-ads',
                 'scheduled_at'  => now(),
             ]);
 
@@ -182,7 +182,7 @@ class TriggerReactivationBackfillJob implements ShouldQueue
                 'syncable_id'   => $property->id,
                 'job_type'      => GscHistoricalImportJob::class,
                 'status'        => 'queued',
-                'queue'         => 'imports',
+                'queue'         => 'imports-gsc',
                 'scheduled_at'  => now(),
             ]);
 

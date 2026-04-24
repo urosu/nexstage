@@ -9,6 +9,7 @@ use App\Http\Controllers\SeoController;
 use App\Http\Controllers\AcquisitionController;
 use App\Http\Controllers\AnalyticsController;
 use App\Http\Controllers\CountriesController;
+use App\Http\Controllers\StorePageController;
 use App\Http\Controllers\DiscrepancyController;
 use App\Http\Controllers\WinnersLosersController;
 use App\Http\Controllers\DashboardController;
@@ -16,7 +17,7 @@ use App\Http\Controllers\FacebookOAuthController;
 use App\Http\Controllers\GoogleOAuthController;
 use App\Http\Controllers\ShopifyOAuthController;
 use App\Http\Controllers\ImportStatusController;
-use App\Http\Controllers\InsightsController;
+use App\Http\Controllers\InboxController;
 use App\Http\Controllers\ManageController;
 use App\Http\Controllers\IntegrationsController;
 use App\Http\Controllers\OnboardingController;
@@ -58,6 +59,11 @@ Route::get('/', function () {
 
 Route::get('/invitations/{token}', [WorkspaceInvitationController::class, 'show'])
     ->name('invitations.show');
+
+// Auth routes (login, register, password reset, etc.) loaded before the workspace
+// prefix group so that single-segment paths like /login are matched here first
+// rather than being captured by the bare GET {workspace:slug} home route.
+require __DIR__.'/auth.php';
 
 // ---------------------------------------------------------------------------
 // Authenticated routes
@@ -118,23 +124,40 @@ Route::middleware('auth')->group(function (): void {
 
     Route::prefix('{workspace:slug}')->middleware(['verified', 'onboarded'])->group(function (): void {
 
-        // Dashboard
-        Route::get('/dashboard', DashboardController::class)->name('dashboard');
+        // Home (was /dashboard — 301 redirect keeps old bookmarks working)
+        Route::get('/', DashboardController::class)->name('home');
+        Route::get('/dashboard', function () {
+            return redirect('/' . request()->segment(1), 301);
+        })->name('dashboard');
         Route::post('/dashboard/dismiss-not-tracked-banner', [DashboardController::class, 'dismissNotTrackedBanner'])
             ->name('dashboard.dismiss-not-tracked-banner');
 
-        // Countries — workspace-level breakdown
-        Route::get('/countries', CountriesController::class)->name('countries');
+        // Store — unified 5-tab destination (Phase 3.2)
+        Route::get('/store', StorePageController::class)->name('store');
+
+        // Countries — redirected to Store › Countries tab (Phase 3.8 IA cleanup)
+        Route::get('/countries', function () {
+            return redirect('/' . request()->segment(1) . '/store?tab=countries', 301);
+        })->name('countries');
 
         // Acquisition — flagship Phase 1.6 page (channel-level attribution)
         Route::get('/acquisition', AcquisitionController::class)->name('acquisition');
 
-        // Analytics sub-pages
-        Route::get('/analytics/products', [AnalyticsController::class, 'products'])->name('analytics.products');
+        // Analytics sub-pages — Phase 3.8: old standalone pages redirect to new IA destinations.
+        // Product detail kept for PDF deep-links (monthly reports link to individual products).
+        Route::get('/analytics/products', function () {
+            return redirect('/' . request()->segment(1) . '/store?tab=products', 301);
+        })->name('analytics.products');
         Route::get('/analytics/products/{product}', [AnalyticsController::class, 'productShow'])->name('analytics.products.show');
-        Route::get('/analytics/daily', [AnalyticsController::class, 'daily'])->name('analytics.daily');
-        Route::get('/analytics/discrepancy', DiscrepancyController::class)->name('analytics.discrepancy');
-        Route::get('/analytics/winners',     WinnersLosersController::class)->name('analytics.winners');
+        Route::get('/analytics/daily', function () {
+            return redirect('/' . request()->segment(1) . '/store?tab=orders', 301);
+        })->name('analytics.daily');
+        Route::get('/analytics/discrepancy', function () {
+            return redirect('/' . request()->segment(1) . '/acquisition?tab=platform-vs-real', 301);
+        })->name('analytics.discrepancy');
+        Route::get('/analytics/winners', function () {
+            return redirect('/' . request()->segment(1) . '/store?tab=products', 301);
+        })->name('analytics.winners');
         Route::post('/analytics/notes/{date}', [AnalyticsController::class, 'upsertNote'])
             ->where('date', '\d{4}-\d{2}-\d{2}')
             ->name('analytics.notes.upsert');
@@ -142,18 +165,38 @@ Route::middleware('auth')->group(function (): void {
         // Order detail — attribution journey for a single order
         Route::get('/orders/{order}', [OrdersController::class, 'show'])->name('orders.show');
 
-        // Insights — AI summaries + alert feed
-        Route::get('/insights', [InsightsController::class, 'index'])->name('insights');
-        Route::post('/insights/alerts/{alert}/dismiss', [InsightsController::class, 'dismiss'])->name('insights.alerts.dismiss');
-        Route::post('/insights/alerts/dismiss-all', [InsightsController::class, 'dismissAll'])->name('insights.alerts.dismiss-all');
-        Route::get('/insights/monthly-report/{year}/{month}', [InsightsController::class, 'downloadMonthlyReport'])
+        // Inbox (Phase 4.2) — unified feed: Today's Attention, Recommendations,
+        // alerts/summaries/notes via InboxItem polymorphic wrapper, monthly PDFs.
+        Route::get('/inbox', [InboxController::class, 'index'])->name('inbox');
+        Route::post('/inbox/items/{item}/snooze', [InboxController::class, 'snooze'])->name('inbox.items.snooze');
+        Route::post('/inbox/items/{item}/done', [InboxController::class, 'markDone'])->name('inbox.items.done');
+        Route::post('/inbox/items/{item}/dismiss', [InboxController::class, 'dismiss'])->name('inbox.items.dismiss');
+        Route::post('/inbox/recommendations/{recommendation}/snooze', [InboxController::class, 'snoozeRecommendation'])->name('inbox.recommendations.snooze');
+        Route::post('/inbox/recommendations/{recommendation}/done', [InboxController::class, 'markRecommendationDone'])->name('inbox.recommendations.done');
+        Route::post('/inbox/recommendations/{recommendation}/dismiss', [InboxController::class, 'dismissRecommendation'])->name('inbox.recommendations.dismiss');
+        Route::get('/inbox/monthly-report/{year}/{month}', [InboxController::class, 'downloadMonthlyReport'])
             ->where(['year' => '\d{4}', 'month' => '\d{1,2}'])
-            ->name('insights.monthly-report');
+            ->name('inbox.monthly-report');
 
-        // Campaigns (unified ad performance page)
-        Route::get('/campaigns',        CampaignsController::class)->name('campaigns.index');
-        Route::get('/campaigns/adsets', AdSetsController::class)->name('campaigns.adsets');
-        Route::get('/campaigns/ads',    AdsController::class)->name('campaigns.ads');
+        // Legacy /insights → /inbox redirects (preserve old bookmarks and email links).
+        Route::get('/insights', function (\App\Models\Workspace $workspace) {
+            return redirect("/{$workspace->slug}/inbox");
+        });
+        Route::get('/insights/monthly-report/{year}/{month}', function (\App\Models\Workspace $workspace, int $year, int $month) {
+            return redirect("/{$workspace->slug}/inbox/monthly-report/{$year}/{$month}");
+        })->where(['year' => '\d{4}', 'month' => '\d{1,2}']);
+
+        // Campaigns — unified level-toggle page (Phase 4.1).
+        // Legacy sub-routes redirect to the level param so old bookmarks / links keep working.
+        Route::get('/campaigns', CampaignsController::class)->name('campaigns.index');
+        Route::get('/campaigns/adsets', function (\Illuminate\Http\Request $req, \App\Models\Workspace $workspace) {
+            $qs = http_build_query(array_merge($req->query(), ['level' => 'adset']));
+            return redirect("/{$workspace->slug}/campaigns?{$qs}");
+        })->name('campaigns.adsets');
+        Route::get('/campaigns/ads', function (\Illuminate\Http\Request $req, \App\Models\Workspace $workspace) {
+            $qs = http_build_query(array_merge($req->query(), ['level' => 'ad']));
+            return redirect("/{$workspace->slug}/campaigns?{$qs}");
+        })->name('campaigns.ads');
         Route::get('/seo', SeoController::class)->name('seo.index');
         Route::get('/performance', \App\Http\Controllers\PerformanceController::class)->name('performance.index');
 
@@ -186,13 +229,23 @@ Route::middleware('auth')->group(function (): void {
         // Stores
         Route::get('/stores', [StoreController::class, 'index'])->name('stores.index');
         Route::get('/stores/{slug}/overview', [StoreController::class, 'overview'])->name('stores.overview');
-        Route::get('/stores/{slug}/products', [StoreController::class, 'products'])->name('stores.products');
-        Route::get('/stores/{slug}/countries', [StoreController::class, 'countries'])->name('stores.countries');
-        Route::get('/stores/{slug}/seo', [StoreController::class, 'seo'])->name('stores.seo');
-        Route::get('/stores/{slug}/performance', [StoreController::class, 'performance'])->name('stores.performance');
         Route::get('/stores/{slug}/settings', [StoreController::class, 'settings'])->name('stores.settings');
+        // Deprecated store sub-pages — redirect to workspace-level destinations (Phase 3.8 IA cleanup)
+        Route::get('/stores/{slug}/products', function () {
+            return redirect('/' . request()->segment(1) . '/store?tab=products', 301);
+        })->name('stores.products');
+        Route::get('/stores/{slug}/countries', function () {
+            return redirect('/' . request()->segment(1) . '/store?tab=countries', 301);
+        })->name('stores.countries');
+        Route::get('/stores/{slug}/seo', function () {
+            return redirect('/' . request()->segment(1) . '/seo', 301);
+        })->name('stores.seo');
+        Route::get('/stores/{slug}/performance', function () {
+            return redirect('/' . request()->segment(1) . '/performance', 301);
+        })->name('stores.performance');
         Route::patch('/stores/{slug}/settings', [StoreController::class, 'update'])->name('stores.update');
         Route::patch('/stores/{slug}/country', [StoreController::class, 'updateCountry'])->name('stores.country');
+        Route::patch('/stores/{slug}/cost-settings', [StoreController::class, 'updateCostSettings'])->name('stores.cost-settings');
         Route::post('/stores/{slug}/urls', [StoreController::class, 'addUrl'])->name('stores.urls.add');
         Route::patch('/stores/{slug}/urls/{urlId}', [StoreController::class, 'updateUrl'])->name('stores.urls.update');
         Route::post('/stores/{slug}/urls/{urlId}/check', [StoreController::class, 'checkUrlNow'])->name('stores.urls.check');
@@ -356,5 +409,3 @@ Route::middleware(['auth', 'verified', 'super_admin'])->prefix('admin')->name('a
 
 // Stop impersonation — auth only, no super_admin check (current user is the impersonated user)
 Route::middleware(['auth'])->post('/admin/impersonation/stop', [AdminController::class, 'stopImpersonating'])->name('admin.impersonation.stop');
-
-require __DIR__.'/auth.php';

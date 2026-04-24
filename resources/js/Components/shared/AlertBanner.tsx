@@ -62,7 +62,7 @@ export function AlertBanner({
     return (
         <div
             className={cn(
-                'mb-4 flex items-start gap-3 rounded-lg border px-4 py-3',
+                'flex items-start gap-3 border-b px-4 py-3',
                 config.bg,
                 config.border,
             )}

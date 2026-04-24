@@ -208,10 +208,10 @@ class WinnersLosersClassifierTest extends TestCase
         $response = $this->inertiaGet('campaigns', ['filter' => 'winners', 'classifier' => 'target']);
         $response->assertStatus(200);
 
-        $campaigns = $response->inertiaProps('campaigns');
-        $this->assertCount(1, $campaigns, 'Only winner should be returned');
-        $this->assertEquals($campaignA->id, $campaigns[0]['id']);
-        $this->assertEquals('winner', $campaigns[0]['wl_tag']);
+        $rows = $response->inertiaProps('rows');
+        $this->assertCount(1, $rows, 'Only winner should be returned');
+        $this->assertEquals($campaignA->id, $rows[0]['id']);
+        $this->assertEquals('winner', $rows[0]['wl_tag']);
         $this->assertEquals('target', $response->inertiaProps('active_classifier'));
     }
 
@@ -228,10 +228,10 @@ class WinnersLosersClassifierTest extends TestCase
         $response = $this->inertiaGet('campaigns', ['filter' => 'losers', 'classifier' => 'target']);
         $response->assertStatus(200);
 
-        $campaigns = $response->inertiaProps('campaigns');
-        $this->assertCount(1, $campaigns, 'Only loser should be returned');
-        $this->assertEquals($campaignB->id, $campaigns[0]['id']);
-        $this->assertEquals('loser', $campaigns[0]['wl_tag']);
+        $rows = $response->inertiaProps('rows');
+        $this->assertCount(1, $rows, 'Only loser should be returned');
+        $this->assertEquals($campaignB->id, $rows[0]['id']);
+        $this->assertEquals('loser', $rows[0]['wl_tag']);
     }
 
     // ─── Campaign: peer classifier ────────────────────────────────────────────────
@@ -255,8 +255,8 @@ class WinnersLosersClassifierTest extends TestCase
 
         $props = $response->inertiaProps();
         $this->assertEquals('peer', $props['active_classifier'], 'Should auto-select peer when no target set');
-        $this->assertCount(1, $props['campaigns']);
-        $this->assertEquals($campaignA->id, $props['campaigns'][0]['id']);
+        $this->assertCount(1, $props['rows']);
+        $this->assertEquals($campaignA->id, $props['rows'][0]['id']);
         $this->assertEquals(2.75, $props['wl_peer_avg_roas']);
     }
 
@@ -346,10 +346,10 @@ class WinnersLosersClassifierTest extends TestCase
         $response = $this->inertiaGet('campaigns', ['filter' => 'winners', 'classifier' => 'period']);
         $response->assertStatus(200);
 
-        $campaigns = $response->inertiaProps('campaigns');
-        $this->assertCount(1, $campaigns, 'Only improved campaign should be winner');
-        $this->assertEquals($campaignA->id, $campaigns[0]['id']);
-        $this->assertEquals('winner', $campaigns[0]['wl_tag']);
+        $rows = $response->inertiaProps('rows');
+        $this->assertCount(1, $rows, 'Only improved campaign should be winner');
+        $this->assertEquals($campaignA->id, $rows[0]['id']);
+        $this->assertEquals('winner', $rows[0]['wl_tag']);
     }
 
     // ─── Products: peer classifier ────────────────────────────────────────────────
@@ -387,7 +387,7 @@ class WinnersLosersClassifierTest extends TestCase
             ],
         ]);
 
-        $response = $this->inertiaGet('analytics/products', ['filter' => 'winners', 'classifier' => 'peer']);
+        $response = $this->inertiaGet('store', ['tab' => 'products', 'filter' => 'winners', 'classifier' => 'peer']);
         $response->assertStatus(200);
 
         $props = $response->inertiaProps();
@@ -417,7 +417,7 @@ class WinnersLosersClassifierTest extends TestCase
             ['workspace_id' => $this->workspace->id, 'store_id' => $this->store->id, 'snapshot_date' => $prevDate, 'product_external_id' => 'prod_b', 'product_name' => 'Product B', 'revenue' =>  800.0, 'units' =>  8, 'rank' => 2, 'created_at' => now()],
         ]);
 
-        $response = $this->inertiaGet('analytics/products', ['filter' => 'winners', 'classifier' => 'period']);
+        $response = $this->inertiaGet('store', ['tab' => 'products', 'filter' => 'winners', 'classifier' => 'period']);
         $response->assertStatus(200);
 
         $products = $response->inertiaProps('products');

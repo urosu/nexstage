@@ -8,6 +8,7 @@ use App\Scopes\WorkspaceScope;
 use Illuminate\Database\Eloquent\Attributes\ScopedBy;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 #[ScopedBy([WorkspaceScope::class])]
@@ -45,5 +46,13 @@ class Ad extends Model
     public function adInsights(): HasMany
     {
         return $this->hasMany(AdInsight::class);
+    }
+
+    /** @return BelongsToMany<CreativeTag> */
+    public function tags(): BelongsToMany
+    {
+        return $this->belongsToMany(CreativeTag::class, 'ad_creative_tags')
+            ->withPivot(['confidence', 'source', 'tagged_at'])
+            ->withTimestamps();
     }
 }

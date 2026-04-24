@@ -12,7 +12,6 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Response as HttpResponse;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Validation\Rule;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -32,7 +31,7 @@ class BillingController extends Controller
 
         $now = now();
 
-        // Last full calendar month billable amount (source of truth for tier assignment).
+        // Last full calendar month billable amount (source of truth for billing).
         // Billing basis: has_store=true → GMV; has_store=false → ad spend.
         // See: PLANNING.md "Billing basis auto-derivation"
         $lastMonth   = $now->copy()->subMonth();
@@ -48,9 +47,7 @@ class BillingController extends Controller
             $now->toDateString(),
         );
 
-        // Resolve the tier that would be assigned based on last month's revenue
-        $revenueForTier = $lastMonthRevenue > 0.0 ? $lastMonthRevenue : $currentMonthRevenue;
-        $resolvedTier   = $this->resolveTierFromRevenue($revenueForTier);
+        $lastMonthBill = $this->computeBill($lastMonthRevenue);
 
         // Subscription, payment methods, and invoices via Cashier — wrapped in try/catch
         // so the billing page renders even when Stripe is not configured.
@@ -152,18 +149,17 @@ class BillingController extends Controller
             \Illuminate\Support\Facades\Log::warning('Stripe unavailable on billing page load', ['error' => $e->getMessage()]);
         }
 
-        $currentMonthTier = $this->resolveTierFromRevenue($currentMonthRevenue);
         $daysUntilBilling = (int) $now->diffInDays($now->copy()->startOfMonth()->addMonth(), false);
 
         // Extrapolate current month billable to a full-month estimate.
         // Only meaningful from day 7 onwards — before that there's too little data.
-        $dayOfMonth              = (int) $now->format('j');
-        $daysInMonth             = (int) $now->format('t');
-        $projectedMonthRevenue   = null;
-        $projectedMonthTier      = null;
+        $dayOfMonth            = (int) $now->format('j');
+        $daysInMonth           = (int) $now->format('t');
+        $projectedMonthRevenue = null;
+        $projectedMonthBill    = null;
         if ($dayOfMonth >= 7 && $currentMonthRevenue > 0.0) {
             $projectedMonthRevenue = (float) round(($currentMonthRevenue / $dayOfMonth) * $daysInMonth, 2);
-            $projectedMonthTier    = $this->resolveTierFromRevenue($projectedMonthRevenue);
+            $projectedMonthBill    = $this->computeBill($projectedMonthRevenue);
         }
 
         // 'gmv' for ecom workspaces, 'ad_spend' for non-ecom.
@@ -189,15 +185,15 @@ class BillingController extends Controller
             'payment_methods'         => $paymentMethodsData,
             'invoices'                => $invoicesData,
             'last_month_revenue'      => $lastMonthRevenue,
+            'last_month_bill'         => $lastMonthBill,
             'current_month_revenue'   => $currentMonthRevenue,
-            'resolved_tier'           => $resolvedTier,
-            'current_month_tier'      => $currentMonthTier,
             'projected_month_revenue' => $projectedMonthRevenue,
-            'projected_month_tier'    => $projectedMonthTier,
+            'projected_bill'         => $projectedMonthBill,
             'days_until_billing'      => $daysUntilBilling,
             'day_of_month'            => $dayOfMonth,
             'days_in_month'           => $daysInMonth,
-            'tier_prices'             => $this->tierPrices(),
+            'plan_rate'               => (float) config('billing.plan.gmv_rate'),
+            'plan_minimum'            => (int) config('billing.plan.minimum_monthly'),
             'billing_basis'           => $billingBasis,
             'status'                  => session('status'),
         ]);
@@ -206,8 +202,8 @@ class BillingController extends Controller
     /**
      * Start a Stripe Checkout session for a new subscription.
      *
-     * The tier is determined automatically from last month's revenue.
-     * The user only selects monthly vs annual billing interval.
+     * Single plan: €39/mo minimum + 0.4% of monthly GMV, metered via usage reporting.
+     * Enterprise workspaces are invoiced manually and cannot self-subscribe.
      */
     public function subscribe(Request $request): RedirectResponse
     {
@@ -217,31 +213,7 @@ class BillingController extends Controller
 
         $this->authorize('manageBilling', $workspace);
 
-        $validated = $request->validate([
-            'interval' => ['sometimes', 'string', Rule::in(['monthly', 'annual'])],
-        ]);
-
-        $interval = $validated['interval'] ?? 'monthly';
-
-        // Determine tier from last full calendar month billable amount (GMV or ad spend).
-        $now         = now();
-        $lastMonth   = $now->copy()->subMonth();
-        $startOfLast = $lastMonth->copy()->startOfMonth()->toDateString();
-        $endOfLast   = $lastMonth->copy()->endOfMonth()->toDateString();
-
-        $revenue = $this->computeBillableAmount($workspace, $startOfLast, $endOfLast);
-
-        // Fall back to current month if no last month data yet.
-        if ($revenue === 0.0) {
-            $revenue = $this->computeBillableAmount(
-                $workspace,
-                $now->copy()->startOfMonth()->toDateString(),
-                $now->toDateString(),
-            );
-        }
-
-        $tier     = $this->resolveTierFromRevenue($revenue);
-        $priceId  = $this->priceIdForTier($tier, $interval);
+        $priceId = config('billing.plan.price_id') ?: null;
 
         if ($priceId === null) {
             return back()->withErrors(['billing' => 'Subscription not available. Please contact support.']);
@@ -550,61 +522,15 @@ class BillingController extends Controller
     }
 
     /**
-     * Resolve billing tier name from a billable amount.
-     * Returns the flat tier key ('starter'/'growth') or 'scale' for the metered tier.
+     * Compute the monthly bill for a given billable amount.
+     * Formula: max(revenue × gmv_rate, minimum_monthly).
+     * See PLANNING.md §9 for the pricing spec.
      */
-    private function resolveTierFromRevenue(float $revenue): string
+    private function computeBill(float $revenue): float
     {
-        /** @var array<string, array{revenue_limit: int}> $flatPlans */
-        $flatPlans = config('billing.flat_plans', []);
+        $rate    = (float) config('billing.plan.gmv_rate');
+        $minimum = (float) config('billing.plan.minimum_monthly');
 
-        // Sort ascending by revenue_limit so we return the lowest qualifying tier.
-        uasort($flatPlans, static fn ($a, $b) => $a['revenue_limit'] <=> $b['revenue_limit']);
-
-        foreach ($flatPlans as $planName => $config) {
-            if ($revenue <= (float) $config['revenue_limit']) {
-                return $planName;
-            }
-        }
-
-        // Scale is the metered tier. DB plan key = 'scale'.
-        return 'scale';
-    }
-
-    /**
-     * Return the Stripe Price ID for the given tier and billing interval.
-     * Scale (metered) has no annual option.
-     * Returns null if the price ID is not configured.
-     */
-    private function priceIdForTier(string $tier, string $interval): ?string
-    {
-        if ($tier === 'scale') {
-            return config('billing.scale_plan.price_id') ?: null;
-        }
-
-        $flatPlans = config('billing.flat_plans', []);
-
-        if (! isset($flatPlans[$tier])) {
-            return null;
-        }
-
-        return $interval === 'annual'
-            ? ($flatPlans[$tier]['price_id_annual'] ?: null)
-            : ($flatPlans[$tier]['price_id_monthly'] ?: null);
-    }
-
-    /**
-     * Return monthly/annual prices per tier for the billing UI.
-     * Scale is metered: monthly/annual are null (computed dynamically from usage).
-     *
-     * @return array<string, array{monthly: int|null, annual: int|null, rate_gmv: float|null, rate_ad_spend: float|null}>
-     */
-    private function tierPrices(): array
-    {
-        return [
-            'starter' => ['monthly' => 29,  'annual' => 290,  'rate_gmv' => null, 'rate_ad_spend' => null],
-            'growth'  => ['monthly' => 59,  'annual' => 590,  'rate_gmv' => null, 'rate_ad_spend' => null],
-            'scale'   => ['monthly' => null, 'annual' => null, 'rate_gmv' => 0.01, 'rate_ad_spend' => 0.02],
-        ];
+        return max($revenue * $rate, $minimum);
     }
 }

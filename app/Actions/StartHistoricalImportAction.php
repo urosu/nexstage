@@ -56,7 +56,7 @@ class StartHistoricalImportAction
             'syncable_id'   => $store->id,
             'job_type'      => ShopifyHistoricalImportJob::class,
             'status'        => 'queued',
-            'queue'         => 'imports',
+            'queue'         => 'imports-store',
             'scheduled_at'  => now(),
         ]);
 
@@ -93,7 +93,7 @@ class StartHistoricalImportAction
             'syncable_id'   => $store->id,
             'job_type'      => WooCommerceHistoricalImportJob::class,
             'status'        => 'queued',
-            'queue'         => 'imports',
+            'queue'         => 'imports-store',
             'scheduled_at'  => now(),
         ]);
 

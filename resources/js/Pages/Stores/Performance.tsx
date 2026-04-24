@@ -6,6 +6,7 @@ import { wurl } from '@/lib/workspace-url';
 import AppLayout from '@/Components/layouts/AppLayout';
 import { StoreLayout } from '@/Components/layouts/StoreLayout';
 import type { StoreData } from '@/Components/layouts/StoreLayout';
+import { PageHeader } from '@/Components/shared/PageHeader';
 import type { PageProps } from '@/types';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -26,6 +27,7 @@ interface Props extends PageProps {
     store: StoreData;
     store_urls: StoreUrlData[];
     gsc_suggestions: string[];
+    narrative: string | null;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -205,7 +207,7 @@ function UrlRow({
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
-export default function StorePerformance({ store, store_urls, gsc_suggestions }: Props) {
+export default function StorePerformance({ store, store_urls, gsc_suggestions, narrative }: Props) {
     const { flash, workspace } = usePage<PageProps>().props;
     const w = (path: string) => wurl(workspace?.slug, path);
     const addForm = useForm({ url: '', label: '' });
@@ -228,6 +230,7 @@ export default function StorePerformance({ store, store_urls, gsc_suggestions }:
         <AppLayout>
             <Head title={`${store.name} — Performance`} />
             <StoreLayout store={store} activeTab="performance">
+                <PageHeader title="Performance" subtitle="Lighthouse scores for monitored URLs" narrative={narrative} />
                 <div className="max-w-2xl space-y-6">
 
                     {flash?.success && (

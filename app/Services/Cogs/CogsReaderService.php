@@ -7,30 +7,57 @@ namespace App\Services\Cogs;
 /**
  * Extracts unit cost (COGS) from a WooCommerce order line item's meta_data.
  *
- * Only reads the WooCommerce native COGS field (`_wc_cogs_total_cost`), available
- * in WooCommerce 9.5+ under Analytics → Settings → Cost of Goods Sold.
- * Third-party plugin fields (WPFactory, WC.com extension) are intentionally ignored.
+ * Tries built-in meta keys in priority order, then any custom keys configured
+ * per store. First non-null positive result wins.
+ *
+ * Built-in priority:
+ *   1. _wc_cogs_total_cost  — WC 10.3+ core (Analytics → Settings → COGS); total for line, ÷ qty
+ *   2. _wc_cog_cost         — SkyVerge "Cost of Goods Sold" extension; unit cost
+ *   3. _alg_wc_cog_cost     — WPFactory "Cost of Goods for WooCommerce" (free); unit cost
+ *   4. _wcj_purchase_price  — Booster for WooCommerce; unit cost
  *
  * Reads: raw WooCommerce line item array (from REST API `line_items[].meta_data`)
  * Writes: nothing — returns a ?float for the caller to write to order_items.unit_cost
- * Called by: UpsertWooCommerceOrderAction (Step 7, per line item)
+ * Called by: UpsertWooCommerceOrderAction (per line item)
  *
  * @see PLANNING.md section 7
  */
 class CogsReaderService
 {
     /**
+     * Built-in meta keys, in priority order.
+     * 'total' → divide by quantity; 'unit' → use as-is.
+     *
+     * @var array<int, array{key: string, value_type: 'unit'|'total'}>
+     */
+    private const BUILTIN_KEYS = [
+        ['key' => '_wc_cogs_total_cost', 'value_type' => 'total'],
+        ['key' => '_wc_cog_cost',        'value_type' => 'unit'],
+        ['key' => '_alg_wc_cog_cost',    'value_type' => 'unit'],
+        ['key' => '_wcj_purchase_price', 'value_type' => 'unit'],
+    ];
+
+    /**
      * Attempt to extract unit cost from a single WooCommerce line item.
      *
-     * @param  array<string, mixed> $lineItem  Raw WooCommerce line_items[] entry from REST API.
+     * @param  array<string, mixed>                        $lineItem       Raw WooCommerce line_items[] entry.
+     * @param  array<int, array{key: string, value_type: 'unit'|'total'}> $customMetaKeys Per-store extra keys to probe after built-ins.
      * @return float|null  Unit cost in the order currency, or null if no COGS data found.
      */
-    public function readFromLineItem(array $lineItem): ?float
+    public function readFromLineItem(array $lineItem, array $customMetaKeys = []): ?float
     {
         $metaMap  = $this->buildItemMetaMap($lineItem);
         $quantity = max(1, (int) ($lineItem['quantity'] ?? 1));
 
-        return $this->tryWcCore($metaMap, $quantity);
+        foreach ([...self::BUILTIN_KEYS, ...$customMetaKeys] as $spec) {
+            $result = $this->tryMetaKey($metaMap, $spec['key'], $spec['value_type'], $quantity);
+
+            if ($result !== null) {
+                return $result;
+            }
+        }
+
+        return null;
     }
 
     // -------------------------------------------------------------------------
@@ -38,23 +65,20 @@ class CogsReaderService
     // -------------------------------------------------------------------------
 
     /**
-     * WooCommerce native COGS (WC 9.5+, Analytics → Settings → Cost of Goods Sold).
-     *
-     * Stores the total cost for the line in `_wc_cogs_total_cost`.
-     * Unit cost = total_cost / quantity.
-     *
-     * @param array<string, string> $metaMap
+     * @param  array<string, string>  $metaMap
+     * @param  'unit'|'total'         $valueType
      */
-    private function tryWcCore(array $metaMap, int $quantity): ?float
+    private function tryMetaKey(array $metaMap, string $key, string $valueType, int $quantity): ?float
     {
-        $totalCost = $this->positiveFloat($metaMap['_wc_cogs_total_cost'] ?? null);
+        $raw = $this->positiveFloat($metaMap[$key] ?? null);
 
-        if ($totalCost === null) {
+        if ($raw === null) {
             return null;
         }
 
-        // Guard against quantity = 0 (malformed order item); already clamped to ≥1 above.
-        return round($totalCost / $quantity, 4);
+        return $valueType === 'total'
+            ? round($raw / $quantity, 4)
+            : round($raw, 4);
     }
 
     // -------------------------------------------------------------------------
@@ -64,7 +88,7 @@ class CogsReaderService
     /**
      * Build a key→value map from a line item's meta_data array.
      *
-     * @param  array<string, mixed> $lineItem
+     * @param  array<string, mixed>  $lineItem
      * @return array<string, string>
      */
     private function buildItemMetaMap(array $lineItem): array

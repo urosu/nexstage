@@ -6,6 +6,8 @@ namespace App\Http\Controllers;
 
 use App\Models\Store;
 use App\Models\Workspace;
+use App\Services\NarrativeTemplateService;
+use App\Services\ProfitCalculator;
 use App\Services\WorkspaceContext;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -22,6 +24,10 @@ use Inertia\Response;
  */
 class CountriesController extends Controller
 {
+    public function __construct(
+        private readonly NarrativeTemplateService $narrative,
+    ) {}
+
     public function __invoke(Request $request): Response
     {
         $workspaceId = app(WorkspaceContext::class)->id();
@@ -47,9 +53,12 @@ class CountriesController extends Controller
         $classifier = $validated['classifier'] ?? null;
         $storeIds   = $this->parseStoreIds($validated['store_ids'] ?? '', $workspaceId);
 
-        $storeClause = ! empty($storeIds)
+        $storeClause  = ! empty($storeIds)
             ? 'AND o.store_id IN (' . implode(',', array_map('intval', $storeIds)) . ')'
             : '';
+
+        $stores       = Store::withoutGlobalScopes()->where('workspace_id', $workspaceId)->get();
+        $costSettings = ProfitCalculator::settingsForStores($storeIds, $stores);
 
         // ── Store revenue + orders by country ────────────────────────────────
         $orderRows = DB::select("
@@ -77,6 +86,35 @@ class CountriesController extends Controller
                 'revenue' => $rev,
             ];
             $totalRevenue += $rev;
+        }
+
+        // ── Tax, refunds, shipping by country (for ProfitCalculator) ────────
+        $costRows = DB::select("
+            SELECT
+                o.shipping_country                                                                                    AS country_code,
+                COALESCE(SUM(o.tax), 0)                                                                               AS total_tax,
+                COALESCE(SUM(o.refund_amount), 0)                                                                     AS total_refunds,
+                COALESCE(SUM(o.shipping), 0)                                                                          AS total_shipping,
+                COALESCE(SUM(CASE WHEN o.tax = 0 THEN COALESCE(o.total_in_reporting_currency, o.total) ELSE 0 END), 0) AS revenue_no_tax,
+                COUNT(*)                                                                                              AS order_count
+            FROM orders o
+            WHERE o.workspace_id = ?
+              AND o.occurred_at::date BETWEEN ? AND ?
+              AND o.status IN ('completed', 'processing')
+              AND o.shipping_country IS NOT NULL
+              {$storeClause}
+            GROUP BY o.shipping_country
+        ", [$workspaceId, $from, $to]);
+
+        $costMap = [];
+        foreach ($costRows as $r) {
+            $costMap[strtoupper((string) $r->country_code)] = [
+                'total_tax'      => (float) $r->total_tax,
+                'total_refunds'  => (float) $r->total_refunds,
+                'total_shipping' => (float) $r->total_shipping,
+                'revenue_no_tax' => (float) $r->revenue_no_tax,
+                'order_count'    => (int)   $r->order_count,
+            ];
         }
 
         // ── COGS / contribution margin by country ────────────────────────────
@@ -174,12 +212,26 @@ class CountriesController extends Controller
             $orders  = $byCountry[$code]['orders']  ?? 0;
             $revenue = $byCountry[$code]['revenue'] ?? 0.0;
             $cogs    = $cogsMap[$code] ?? null;
-            $margin  = $cogs !== null ? $revenue - $cogs : null;
             $fb      = $fbSpendMap[$code] ?? null;
             $google  = $googleSpendMap[$code] ?? null;
             $gsc     = $gscMap[$code] ?? null;
             $totalAd = ($fb ?? 0) + ($google ?? 0);
-            $realRoas = ($totalAd > 0 && $revenue > 0) ? round($revenue / $totalAd, 2) : null;
+
+            $costs     = $costMap[$code] ?? [];
+            $profitAdj = ProfitCalculator::compute(
+                revenue:       $revenue,
+                totalTax:      (float) ($costs['total_tax']      ?? 0),
+                revenueNoTax:  (float) ($costs['revenue_no_tax'] ?? 0),
+                totalRefunds:  (float) ($costs['total_refunds']  ?? 0),
+                totalShipping: (float) ($costs['total_shipping'] ?? 0),
+                orderCount:    (int)   ($costs['order_count']    ?? 0),
+                settings:      $costSettings,
+                countryCode:   $code,
+            );
+
+            $netRevenue = $profitAdj['net_revenue'];
+            $margin     = $cogs !== null ? $netRevenue - $cogs : null;
+            $realRoas   = ($totalAd > 0 && $netRevenue > 0) ? round($netRevenue / $totalAd, 2) : null;
             $realProfit = $margin !== null && $totalAd > 0 ? round($margin - $totalAd, 2) : null;
 
             $countries[] = [
@@ -332,6 +384,8 @@ class CountriesController extends Controller
             'filter'                 => $filter,
             'classifier'             => $classifier,
             'active_classifier'      => $effectiveClassifier,
+            // No narrative method for country breakdown yet (Phase 3.5 items).
+            'narrative'              => null,
         ]);
     }
 

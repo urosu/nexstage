@@ -58,6 +58,11 @@ return new class extends Migration
             $table->decimal('target_cpo', 10, 2)->nullable();
             $table->decimal('target_marketing_pct', 5, 2)->nullable();
 
+            // Cost settings for profit calculations: tax deduction, shipping cost mode,
+            // and fixed monthly overheads. Schema is managed by StoreCostSettings VO —
+            // no migrations needed when adding/removing keys.
+            $table->jsonb('cost_settings')->nullable();
+
             $table->string('historical_import_status', 50)->nullable();
             $table->date('historical_import_from')->nullable();
             $table->jsonb('historical_import_checkpoint')->nullable();

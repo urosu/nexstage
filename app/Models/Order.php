@@ -50,6 +50,8 @@ class Order extends Model
         'raw_meta',
         'raw_meta_api_version',
         'platform_data',
+        'payment_fee',
+        'is_first_for_customer',
         'occurred_at',
         'synced_at',
     ];
@@ -71,6 +73,8 @@ class Order extends Model
             'attribution_parsed_at' => 'datetime',
             'raw_meta' => 'array',
             'platform_data' => 'array',
+            'payment_fee' => 'decimal:4',
+            'is_first_for_customer' => 'boolean',
             'occurred_at' => 'datetime',
             'synced_at' => 'datetime',
         ];

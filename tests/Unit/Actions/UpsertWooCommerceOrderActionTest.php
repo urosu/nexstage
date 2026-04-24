@@ -7,7 +7,6 @@ namespace Tests\Unit\Actions;
 use App\Actions\UpsertWooCommerceOrderAction;
 use App\Models\FxRate;
 use App\Models\Order;
-use App\Models\OrderItem;
 use App\Models\Store;
 use App\Models\Workspace;
 use App\Services\WorkspaceContext;
@@ -273,13 +272,13 @@ class UpsertWooCommerceOrderActionTest extends TestCase
 
         $this->assertDatabaseHas('order_coupons', [
             'order_id'        => $order->id,
-            'coupon_code'     => 'SUMMER20',
+            'coupon_code'     => 'summer20',
             'discount_amount' => 20.00,
             'discount_type'   => null,
         ]);
         $this->assertDatabaseHas('order_coupons', [
             'order_id'        => $order->id,
-            'coupon_code'     => 'FREESHIP',
+            'coupon_code'     => 'freeship',
             'discount_amount' => 5.00,
         ]);
     }
@@ -298,8 +297,8 @@ class UpsertWooCommerceOrderActionTest extends TestCase
         $this->action->handle($this->store, 'EUR', $order);
 
         $this->assertDatabaseCount('order_coupons', 1);
-        $this->assertDatabaseHas('order_coupons', ['coupon_code' => 'NEW15']);
-        $this->assertDatabaseMissing('order_coupons', ['coupon_code' => 'OLD10']);
+        $this->assertDatabaseHas('order_coupons', ['coupon_code' => 'new15']);
+        $this->assertDatabaseMissing('order_coupons', ['coupon_code' => 'old10']);
     }
 
     public function test_order_items_replaced_on_re_upsert(): void
@@ -322,5 +321,63 @@ class UpsertWooCommerceOrderActionTest extends TestCase
         // Second call: 1 item — should replace all
         $this->action->handle($this->store, 'EUR', $this->makeWcOrder(['line_items' => $makeItems(1)]));
         $this->assertDatabaseCount('order_items', 1);
+    }
+
+    public function test_payment_fee_summed_from_matching_fee_lines(): void
+    {
+        $this->action->handle($this->store, 'EUR', $this->makeWcOrder([
+            'fee_lines' => [
+                ['name' => 'Stripe Fee',   'total' => '1.50'],
+                ['name' => 'Gift Wrapping', 'total' => '5.00'], // no keyword match — excluded
+            ],
+        ]));
+
+        $order = Order::withoutGlobalScopes()->where('store_id', $this->store->id)->first();
+        $this->assertEqualsWithDelta(1.50, (float) $order->payment_fee, 0.01);
+    }
+
+    public function test_payment_fee_zero_when_no_matching_fee_lines(): void
+    {
+        $this->action->handle($this->store, 'EUR', $this->makeWcOrder([
+            'fee_lines' => [
+                ['name' => 'Gift Wrap', 'total' => '5.00'],
+            ],
+        ]));
+
+        $order = Order::withoutGlobalScopes()->where('store_id', $this->store->id)->first();
+        $this->assertEquals(0.0, (float) $order->payment_fee);
+    }
+
+    public function test_is_first_for_customer_true_for_new_email(): void
+    {
+        $this->action->handle($this->store, 'EUR', $this->makeWcOrder([
+            'billing' => ['email' => 'brand-new@example.com', 'country' => 'DE'],
+        ]));
+
+        $order = Order::withoutGlobalScopes()->where('store_id', $this->store->id)->first();
+        $this->assertTrue((bool) $order->is_first_for_customer);
+    }
+
+    public function test_is_first_for_customer_false_for_second_order(): void
+    {
+        $email = 'returning@example.com';
+
+        $this->action->handle($this->store, 'EUR', $this->makeWcOrder([
+            'id'               => '2001',
+            'date_created_gmt' => now()->subDays(5)->toIso8601String(),
+            'billing'          => ['email' => $email, 'country' => 'DE'],
+        ]));
+
+        $this->action->handle($this->store, 'EUR', $this->makeWcOrder([
+            'id'               => '2002',
+            'date_created_gmt' => now()->toIso8601String(),
+            'billing'          => ['email' => $email, 'country' => 'DE'],
+        ]));
+
+        $first  = Order::withoutGlobalScopes()->where('store_id', $this->store->id)->where('external_id', '2001')->first();
+        $second = Order::withoutGlobalScopes()->where('store_id', $this->store->id)->where('external_id', '2002')->first();
+
+        $this->assertTrue((bool) $first->is_first_for_customer);
+        $this->assertFalse((bool) $second->is_first_for_customer);
     }
 }

@@ -35,6 +35,6 @@ class WorkspaceSwitchController extends Controller
 
         $request->session()->put('active_workspace_id', $workspaceModel->id);
 
-        return redirect("/{$workspaceModel->slug}/dashboard");
+        return redirect("/{$workspaceModel->slug}");
     }
 }

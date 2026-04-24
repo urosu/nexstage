@@ -40,9 +40,12 @@ use Throwable;
  *
  * On every run queries the last 5 days (covers GSC's 2-3 day data lag).
  *
- * Per-date, per-data-type this job makes TWO API calls:
+ * Per-data-type this job makes TWO API calls:
  *   1. Aggregate (no device/country) → upserted with device='all', country='ZZ'
  *   2. Breakdown (device + country dimensions) → upserted with actual device/country values
+ *
+ * All 6 calls (3 data types × 2 slices) are fired concurrently via Http::pool,
+ * making the whole sync one HTTP/2-multiplexed batch (~1s wall time).
  *
  * Why two calls instead of one breakdown-only call: aggregate rows are used by Phase 2 anomaly
  * detection (gsc_clicks baseline). Breakdown rows are Phase 0 data capture for future analysis.
@@ -114,37 +117,33 @@ class SyncSearchConsoleJob implements ShouldQueue, ShouldBeUnique
             $client = SearchConsoleClient::forProperty($property);
 
             // Query last 5 days to cover the 2-3 day GSC data lag.
+            // dataState='all' is kept so the edge days reflect the freshest
+            // (partial) data — the rolling window overwrites them on each run.
             // See: PLANNING.md "Integration-specific rules"
             $endDate   = now()->subDay()->toDateString();
             $startDate = now()->subDays(5)->toDateString();
 
             $propertyUrl = $property->property_url;
 
-            $recordsProcessed = 0;
+            // Fire all 6 dim-slices concurrently — one HTTP/2 multiplexed batch.
+            // All cover the same 5-day range, so GSC returns at most 5 * 25,000
+            // rows per breakdown, which is plenty for SMB properties.
+            $responses = $client->searchAnalyticsPool($propertyUrl, [
+                'daily'            => ['startDate' => $startDate, 'endDate' => $endDate, 'dimensions' => ['date']],
+                'daily_breakdown'  => ['startDate' => $startDate, 'endDate' => $endDate, 'dimensions' => ['date', 'device', 'country']],
+                'queries'          => ['startDate' => $startDate, 'endDate' => $endDate, 'dimensions' => ['date', 'query']],
+                'queries_breakdown'=> ['startDate' => $startDate, 'endDate' => $endDate, 'dimensions' => ['date', 'query', 'device', 'country']],
+                'pages'            => ['startDate' => $startDate, 'endDate' => $endDate, 'dimensions' => ['date', 'page']],
+                'pages_breakdown'  => ['startDate' => $startDate, 'endDate' => $endDate, 'dimensions' => ['date', 'page', 'device', 'country']],
+            ]);
 
-            // 1. Daily aggregate stats (device='all', country='ZZ')
-            $dailyRows = $client->queryDailyStats($propertyUrl, $startDate, $endDate);
-            $recordsProcessed += $this->upsertDailyStats($dailyRows, $property);
-
-            // 2. Daily stats by device + country (Phase 0 data capture)
-            $dailyBreakdownRows = $client->queryDailyStatsBreakdown($propertyUrl, $startDate, $endDate);
-            $recordsProcessed += $this->upsertDailyStats($dailyBreakdownRows, $property);
-
-            // 3. Per-query aggregate (device='all', country='ZZ')
-            $queryRows = $client->querySearchQueries($propertyUrl, $startDate, $endDate);
-            $recordsProcessed += $this->upsertQueries($queryRows, $property);
-
-            // 4. Per-query by device + country (Phase 0 data capture)
-            $queryBreakdownRows = $client->querySearchQueriesBreakdown($propertyUrl, $startDate, $endDate);
-            $recordsProcessed += $this->upsertQueries($queryBreakdownRows, $property);
-
-            // 5. Per-page aggregate (device='all', country='ZZ')
-            $pageRows = $client->queryPages($propertyUrl, $startDate, $endDate);
-            $recordsProcessed += $this->upsertPages($pageRows, $property);
-
-            // 6. Per-page by device + country (Phase 0 data capture)
-            $pageBreakdownRows = $client->queryPagesBreakdown($propertyUrl, $startDate, $endDate);
-            $recordsProcessed += $this->upsertPages($pageBreakdownRows, $property);
+            $recordsProcessed  = 0;
+            $recordsProcessed += $this->upsertDailyStats($responses['daily'] ?? [], $property);
+            $recordsProcessed += $this->upsertDailyStats($responses['daily_breakdown'] ?? [], $property);
+            $recordsProcessed += $this->upsertQueries($responses['queries'] ?? [], $property);
+            $recordsProcessed += $this->upsertQueries($responses['queries_breakdown'] ?? [], $property);
+            $recordsProcessed += $this->upsertPages($responses['pages'] ?? [], $property);
+            $recordsProcessed += $this->upsertPages($responses['pages_breakdown'] ?? [], $property);
 
             // Mark success
             $property->update([
@@ -187,11 +186,14 @@ class SyncSearchConsoleJob implements ShouldQueue, ShouldBeUnique
      * constraints, so nullable device/country would allow duplicate workspace-level rows.
      * See: PLANNING.md "gsc_daily_stats"
      *
+     * Uses a single bulk upsert instead of per-row updateOrCreate to avoid N+1 DB calls.
+     *
      * @param  list<array<string, mixed>> $rows
      */
     private function upsertDailyStats(array $rows, SearchConsoleProperty $property): int
     {
-        $count = 0;
+        $records = [];
+        $now     = now();
 
         foreach ($rows as $row) {
             $date = (string) ($row['date'] ?? '');
@@ -206,26 +208,32 @@ class SyncSearchConsoleJob implements ShouldQueue, ShouldBeUnique
             $device  = strtolower((string) ($row['device'] ?? '')) ?: 'all';
             $country = strtoupper((string) ($row['country'] ?? '')) ?: 'ZZ';
 
-            GscDailyStat::withoutGlobalScopes()->updateOrCreate(
-                [
-                    'property_id' => $property->id,
-                    'date'        => $date,
-                    'device'      => $device,
-                    'country'     => $country,
-                ],
-                [
-                    'workspace_id' => $this->workspaceId,
-                    'clicks'       => (int) ($row['clicks'] ?? 0),
-                    'impressions'  => (int) ($row['impressions'] ?? 0),
-                    'ctr'          => isset($row['ctr']) ? (float) $row['ctr'] : null,
-                    'position'     => isset($row['position']) ? (float) $row['position'] : null,
-                ]
-            );
-
-            $count++;
+            $records[] = [
+                'property_id'  => $property->id,
+                'workspace_id' => $this->workspaceId,
+                'date'         => $date,
+                'device'       => $device,
+                'country'      => $country,
+                'clicks'       => (int) ($row['clicks'] ?? 0),
+                'impressions'  => (int) ($row['impressions'] ?? 0),
+                'ctr'          => isset($row['ctr']) ? (float) $row['ctr'] : null,
+                'position'     => isset($row['position']) ? (float) $row['position'] : null,
+                'created_at'   => $now,
+                'updated_at'   => $now,
+            ];
         }
 
-        return $count;
+        if (empty($records)) {
+            return 0;
+        }
+
+        GscDailyStat::withoutGlobalScopes()->upsert(
+            $records,
+            ['property_id', 'date', 'device', 'country'],
+            ['clicks', 'impressions', 'ctr', 'position', 'updated_at'],
+        );
+
+        return count($records);
     }
 
     /**
@@ -234,11 +242,14 @@ class SyncSearchConsoleJob implements ShouldQueue, ShouldBeUnique
      * Unique key: (property_id, date, query, device, country).
      * Same device/country sentinel logic as upsertDailyStats.
      *
+     * Uses a single bulk upsert instead of per-row updateOrCreate to avoid N+1 DB calls.
+     *
      * @param  list<array<string, mixed>> $rows
      */
     private function upsertQueries(array $rows, SearchConsoleProperty $property): int
     {
-        $count = 0;
+        $records = [];
+        $now     = now();
 
         foreach ($rows as $row) {
             $date  = (string) ($row['date'] ?? '');
@@ -251,27 +262,33 @@ class SyncSearchConsoleJob implements ShouldQueue, ShouldBeUnique
             $device  = strtolower((string) ($row['device'] ?? '')) ?: 'all';
             $country = strtoupper((string) ($row['country'] ?? '')) ?: 'ZZ';
 
-            GscQuery::withoutGlobalScopes()->updateOrCreate(
-                [
-                    'property_id' => $property->id,
-                    'date'        => $date,
-                    'query'       => $query,
-                    'device'      => $device,
-                    'country'     => $country,
-                ],
-                [
-                    'workspace_id' => $this->workspaceId,
-                    'clicks'       => (int) ($row['clicks'] ?? 0),
-                    'impressions'  => (int) ($row['impressions'] ?? 0),
-                    'ctr'          => isset($row['ctr']) ? (float) $row['ctr'] : null,
-                    'position'     => isset($row['position']) ? (float) $row['position'] : null,
-                ]
-            );
-
-            $count++;
+            $records[] = [
+                'property_id'  => $property->id,
+                'workspace_id' => $this->workspaceId,
+                'date'         => $date,
+                'query'        => $query,
+                'device'       => $device,
+                'country'      => $country,
+                'clicks'       => (int) ($row['clicks'] ?? 0),
+                'impressions'  => (int) ($row['impressions'] ?? 0),
+                'ctr'          => isset($row['ctr']) ? (float) $row['ctr'] : null,
+                'position'     => isset($row['position']) ? (float) $row['position'] : null,
+                'created_at'   => $now,
+                'updated_at'   => $now,
+            ];
         }
 
-        return $count;
+        if (empty($records)) {
+            return 0;
+        }
+
+        GscQuery::withoutGlobalScopes()->upsert(
+            $records,
+            ['property_id', 'date', 'query', 'device', 'country'],
+            ['clicks', 'impressions', 'ctr', 'position', 'updated_at'],
+        );
+
+        return count($records);
     }
 
     /**
@@ -282,11 +299,14 @@ class SyncSearchConsoleJob implements ShouldQueue, ShouldBeUnique
      * Why page_hash: VARCHAR(2000) unique index caused massive B-tree index bloat.
      * See: PLANNING.md "gsc_pages"
      *
+     * Uses a single bulk upsert instead of per-row updateOrCreate to avoid N+1 DB calls.
+     *
      * @param  list<array<string, mixed>> $rows
      */
     private function upsertPages(array $rows, SearchConsoleProperty $property): int
     {
-        $count = 0;
+        $records = [];
+        $now     = now();
 
         foreach ($rows as $row) {
             $date = (string) ($row['date'] ?? '');
@@ -296,32 +316,37 @@ class SyncSearchConsoleJob implements ShouldQueue, ShouldBeUnique
                 continue;
             }
 
-            $pageHash = hash('sha256', $page);
-            $device   = strtolower((string) ($row['device'] ?? '')) ?: 'all';
-            $country  = strtoupper((string) ($row['country'] ?? '')) ?: 'ZZ';
+            $device  = strtolower((string) ($row['device'] ?? '')) ?: 'all';
+            $country = strtoupper((string) ($row['country'] ?? '')) ?: 'ZZ';
 
-            GscPage::withoutGlobalScopes()->updateOrCreate(
-                [
-                    'property_id' => $property->id,
-                    'date'        => $date,
-                    'page_hash'   => $pageHash,
-                    'device'      => $device,
-                    'country'     => $country,
-                ],
-                [
-                    'workspace_id' => $this->workspaceId,
-                    'page'         => $page,
-                    'clicks'       => (int) ($row['clicks'] ?? 0),
-                    'impressions'  => (int) ($row['impressions'] ?? 0),
-                    'ctr'          => isset($row['ctr']) ? (float) $row['ctr'] : null,
-                    'position'     => isset($row['position']) ? (float) $row['position'] : null,
-                ]
-            );
-
-            $count++;
+            $records[] = [
+                'property_id'  => $property->id,
+                'workspace_id' => $this->workspaceId,
+                'date'         => $date,
+                'page'         => $page,
+                'page_hash'    => hash('sha256', $page),
+                'device'       => $device,
+                'country'      => $country,
+                'clicks'       => (int) ($row['clicks'] ?? 0),
+                'impressions'  => (int) ($row['impressions'] ?? 0),
+                'ctr'          => isset($row['ctr']) ? (float) $row['ctr'] : null,
+                'position'     => isset($row['position']) ? (float) $row['position'] : null,
+                'created_at'   => $now,
+                'updated_at'   => $now,
+            ];
         }
 
-        return $count;
+        if (empty($records)) {
+            return 0;
+        }
+
+        GscPage::withoutGlobalScopes()->upsert(
+            $records,
+            ['property_id', 'date', 'page_hash', 'device', 'country'],
+            ['page', 'clicks', 'impressions', 'ctr', 'position', 'updated_at'],
+        );
+
+        return count($records);
     }
 
     // -------------------------------------------------------------------------

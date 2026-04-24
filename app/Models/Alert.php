@@ -8,6 +8,7 @@ use App\Scopes\WorkspaceScope;
 use Illuminate\Database\Eloquent\Attributes\ScopedBy;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
 
 #[ScopedBy([WorkspaceScope::class])]
 class Alert extends Model
@@ -65,5 +66,24 @@ class Alert extends Model
     public function property(): BelongsTo
     {
         return $this->belongsTo(SearchConsoleProperty::class, 'property_id');
+    }
+
+    public function inboxItems(): MorphMany
+    {
+        return $this->morphMany(InboxItem::class, 'itemable');
+    }
+
+    protected static function booted(): void
+    {
+        static::created(function (Alert $alert): void {
+            InboxItem::create([
+                'workspace_id'  => $alert->workspace_id,
+                'itemable_type' => self::class,
+                'itemable_id'   => $alert->id,
+                'status'        => $alert->resolved_at !== null
+                    ? InboxItem::STATUS_DONE
+                    : InboxItem::STATUS_OPEN,
+            ]);
+        });
     }
 }

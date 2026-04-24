@@ -8,6 +8,7 @@ use App\Scopes\WorkspaceScope;
 use Illuminate\Database\Eloquent\Attributes\ScopedBy;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
 
 #[ScopedBy([WorkspaceScope::class])]
 class AiSummary extends Model
@@ -33,5 +34,22 @@ class AiSummary extends Model
     public function workspace(): BelongsTo
     {
         return $this->belongsTo(Workspace::class);
+    }
+
+    public function inboxItems(): MorphMany
+    {
+        return $this->morphMany(InboxItem::class, 'itemable');
+    }
+
+    protected static function booted(): void
+    {
+        static::created(function (AiSummary $summary): void {
+            InboxItem::create([
+                'workspace_id'  => $summary->workspace_id,
+                'itemable_type' => self::class,
+                'itemable_id'   => $summary->id,
+                'status'        => InboxItem::STATUS_OPEN,
+            ]);
+        });
     }
 }

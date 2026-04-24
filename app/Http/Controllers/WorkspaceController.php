@@ -127,6 +127,6 @@ class WorkspaceController extends Controller
         $next = $nextWorkspaceUser->workspace;
         session(['active_workspace_id' => $next->id]);
 
-        return redirect("/{$next->slug}/dashboard");
+        return redirect("/{$next->slug}");
     }
 }

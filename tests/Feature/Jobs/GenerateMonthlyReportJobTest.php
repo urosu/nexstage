@@ -157,7 +157,7 @@ class GenerateMonthlyReportJobTest extends TestCase
         Storage::disk('local')->assertExists($expectedPath);
     }
 
-    // ── InsightsController download endpoint ─────────────────────────────────
+    // ── InboxController download endpoint ────────────────────────────────────
 
     public function test_download_endpoint_returns_pdf_response(): void
     {
@@ -173,14 +173,14 @@ class GenerateMonthlyReportJobTest extends TestCase
         Pdf::shouldReceive('loadView')->andReturn($pdfMock);
 
         $this->actingAs($this->user)
-            ->get("/{$this->workspace->slug}/insights/monthly-report/2026/3")
+            ->get("/{$this->workspace->slug}/inbox/monthly-report/2026/3")
             ->assertOk()
             ->assertHeader('Content-Type', 'application/pdf');
     }
 
     public function test_download_endpoint_requires_authentication(): void
     {
-        $this->get("/{$this->workspace->slug}/insights/monthly-report/2026/3")
+        $this->get("/{$this->workspace->slug}/inbox/monthly-report/2026/3")
             ->assertRedirect();
     }
 }

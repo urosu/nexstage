@@ -13,6 +13,8 @@ import AppLayout from '@/Components/layouts/AppLayout';
 import { DateRangePicker } from '@/Components/shared/DateRangePicker';
 import { PageHeader } from '@/Components/shared/PageHeader';
 import { MetricCard } from '@/Components/shared/MetricCard';
+import { OpportunityPanel, OpportunityBadge, PositionBucketChip } from '@/Components/shared';
+import type { OpportunityItem } from '@/Components/shared';
 import { GscMultiSeriesChart } from '@/Components/charts/GscMultiSeriesChart';
 import { formatCurrency, formatNumber } from '@/lib/formatters';
 import { cn } from '@/lib/utils';
@@ -45,6 +47,7 @@ interface QueryRow {
     impressions: number;
     ctr: number | null;
     position: number | null;
+    opportunity: string | null;
 }
 
 interface PageRow {
@@ -60,6 +63,11 @@ interface Summary {
     impressions: number;
     ctr: number | null;
     position: number | null;
+}
+
+interface Opportunities {
+    trending_up: OpportunityItem[];
+    needs_attention: OpportunityItem[];
 }
 
 interface Props {
@@ -79,6 +87,8 @@ interface Props {
     to: string;
     sort: 'clicks' | 'impressions' | 'ctr' | 'position';
     sort_dir: 'asc' | 'desc';
+    opportunities: Opportunities;
+    narrative: string | null;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -131,8 +141,8 @@ function SortTh({
 // ─── GSC data table ───────────────────────────────────────────────────────────
 
 /**
- * Estimate organic revenue for a query/page row: clicks × CVR × AOV.
- * Returns null when organic CVR/AOV unavailable (no organic orders in period).
+ * Estimate organic revenue mid-point for a query/page row: clicks × CVR × AOV.
+ * Displayed as a ±30% range per §F16. Returns null when CVR/AOV unavailable.
  */
 function estimateOrgRevenue(clicks: number, cvr: number | null, aov: number | null): number | null {
     if (cvr === null || aov === null || clicks === 0) return null;
@@ -150,6 +160,7 @@ function GscTable<T extends { clicks: number; impressions: number; ctr: number |
     organicCvr,
     organicAov,
     currency,
+    showOpportunity,
 }: {
     rows: T[];
     labelKey: keyof T;
@@ -161,6 +172,7 @@ function GscTable<T extends { clicks: number; impressions: number; ctr: number |
     organicCvr?: number | null;
     organicAov?: number | null;
     currency?: string;
+    showOpportunity?: boolean;
 }) {
     const showEstRevenue = organicCvr != null && organicAov != null;
     return (
@@ -176,7 +188,10 @@ function GscTable<T extends { clicks: number; impressions: number; ctr: number |
                         <SortTh col="ctr"         label="CTR"         currentSort={sort} currentDir={sortDir} onSort={onSort} className="text-right" />
                         <SortTh col="position"    label="Position"    currentSort={sort} currentDir={sortDir} onSort={onSort} className="text-right" />
                         {showEstRevenue && (
-                            <th className="px-4 py-3 text-right th-label" title="Estimated organic revenue: clicks × organic CVR × organic AOV. Displayed as a range estimate.">
+                            <th
+                                className="px-4 py-3 text-right th-label"
+                                title="Estimated organic revenue: clicks × organic CVR × AOV. ±30% range — actual result varies."
+                            >
                                 Est. Revenue
                             </th>
                         )}
@@ -184,11 +199,20 @@ function GscTable<T extends { clicks: number; impressions: number; ctr: number |
                 </thead>
                 <tbody className="divide-y divide-zinc-100">
                     {rows.map((row) => {
-                        const estRev = showEstRevenue ? estimateOrgRevenue(row.clicks, organicCvr!, organicAov!) : null;
+                        const estMid = showEstRevenue ? estimateOrgRevenue(row.clicks, organicCvr!, organicAov!) : null;
+                        const opportunity = showOpportunity ? (row as unknown as QueryRow).opportunity : null;
                         return (
                             <tr key={(row as unknown as QueryRow).query ?? (row as unknown as PageRow).page} className="hover:bg-zinc-50">
-                                <td className="max-w-[280px] px-4 py-3 text-zinc-800">
-                                    {renderLabel(row)}
+                                <td className="max-w-[300px] px-4 py-3 text-zinc-800">
+                                    <div className="flex flex-col gap-1">
+                                        {renderLabel(row)}
+                                        {showOpportunity && (row.position != null || opportunity) && (
+                                            <div className="flex flex-wrap items-center gap-1">
+                                                <PositionBucketChip position={row.position} />
+                                                <OpportunityBadge type={opportunity} />
+                                            </div>
+                                        )}
+                                    </div>
                                 </td>
                                 <td className="px-4 py-3 text-right tabular-nums text-zinc-700">
                                     {formatNumber(row.clicks)}
@@ -203,8 +227,10 @@ function GscTable<T extends { clicks: number; impressions: number; ctr: number |
                                     {fmtPos(row.position)}
                                 </td>
                                 {showEstRevenue && (
-                                    <td className="px-4 py-3 text-right tabular-nums text-zinc-500">
-                                        {estRev != null ? `~${formatCurrency(estRev, currency ?? 'EUR')}` : '—'}
+                                    <td className="px-4 py-3 text-right tabular-nums text-zinc-500 text-xs" title="±30% range estimate">
+                                        {estMid != null
+                                            ? `${formatCurrency(estMid * 0.7, currency ?? 'EUR')}–${formatCurrency(estMid * 1.3, currency ?? 'EUR')} est.`
+                                            : '—'}
                                     </td>
                                 )}
                             </tr>
@@ -242,6 +268,8 @@ export default function SeoIndex(props: Props) {
         to,
         sort,
         sort_dir,
+        opportunities,
+        narrative,
     } = props;
 
     const [navigating, setNavigating] = useState(() => _inertiaNavigating);
@@ -296,7 +324,7 @@ export default function SeoIndex(props: Props) {
         return (
             <AppLayout dateRangePicker={<DateRangePicker />}>
                 <Head title="SEO" />
-                <PageHeader title="SEO" subtitle="Google Search Console performance" />
+                <PageHeader title="SEO" subtitle="Google Search Console performance" narrative={narrative} />
                 <div className="flex flex-col items-center justify-center rounded-xl border border-zinc-200 bg-white px-6 py-20 text-center">
                     <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-zinc-100">
                         <Search className="h-6 w-6 text-zinc-400" />
@@ -306,7 +334,7 @@ export default function SeoIndex(props: Props) {
                         Connect Google Search Console to view clicks, impressions, CTR, and ranking data.
                     </p>
                     <Link
-                        href="/settings/integrations"
+                        href={wurl(workspace?.slug, '/settings/integrations')}
                         className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
                     >
                         Connect Google Search Console →
@@ -319,7 +347,7 @@ export default function SeoIndex(props: Props) {
     return (
         <AppLayout dateRangePicker={<DateRangePicker />}>
             <Head title="SEO" />
-            <PageHeader title="SEO" subtitle="Google Search Console performance" />
+            <PageHeader title="SEO" subtitle="Google Search Console performance" narrative={narrative} />
 
             {/* ── Property filter ── */}
             <div className="mb-6 flex flex-wrap items-center gap-2">
@@ -351,7 +379,7 @@ export default function SeoIndex(props: Props) {
                                     : 'border-zinc-200 bg-white text-zinc-600 hover:border-zinc-300',
                                 properties.length === 1 && 'cursor-default',
                             )}
-                            title={`${p.property_url} — ${syncDotTitle(p.status, p.last_synced_at)}`}
+                            title={`${formatGscProperty(p.property_url)} — ${syncDotTitle(p.status, p.last_synced_at)}`}
                         >
                             <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', syncDotClass(p.status, p.last_synced_at, 'gsc'))} />
                             {formatGscProperty(p.property_url)}
@@ -377,6 +405,12 @@ export default function SeoIndex(props: Props) {
                     </a>
                 </div>
             )}
+
+            {/* ── Opportunities panel ── */}
+            <OpportunityPanel
+                trendingUp={opportunities.trending_up}
+                needsAttention={opportunities.needs_attention}
+            />
 
             {/* ── Hero cards (5 cards per PLANNING 12.5) ── */}
             <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-5">
@@ -413,6 +447,8 @@ export default function SeoIndex(props: Props) {
                     value={organic_revenue != null ? formatCurrency(organic_revenue, currency) : null}
                     loading={navigating}
                     tooltip="Revenue from orders attributed to organic search via UTM tracking (channel_type = organic_search)."
+                    actionLine="See orders →"
+                    actionHref={wurl(workspace?.slug, '/store?tab=orders')}
                 />
             </div>
 
@@ -459,6 +495,7 @@ export default function SeoIndex(props: Props) {
                             organicCvr={organic_cvr}
                             organicAov={organic_aov}
                             currency={currency}
+                            showOpportunity
                             renderLabel={(row) => (
                                 <span className="block truncate text-sm text-zinc-800" title={row.query}>
                                     {row.query}

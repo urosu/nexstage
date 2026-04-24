@@ -11,12 +11,17 @@ import {
     ReferenceLine,
     ReferenceArea,
 } from 'recharts';
-import { ChevronDown } from 'lucide-react';
+import { AlertTriangle, ChevronDown } from 'lucide-react';
 import AppLayout from '@/Components/layouts/AppLayout';
 import { DateRangePicker } from '@/Components/shared/DateRangePicker';
+import { MetricCard } from '@/Components/shared/MetricCard';
 import { PageHeader } from '@/Components/shared/PageHeader';
+import { PageNarrative } from '@/Components/shared/PageNarrative';
+import { CwvBand } from '@/Components/shared/CwvBand';
+import type { CwvMetric } from '@/Components/shared/CwvBand';
 import { cn } from '@/lib/utils';
 import { wurl } from '@/lib/workspace-url';
+import { formatCurrency } from '@/lib/formatters';
 import type { PageProps } from '@/types';
 import type { HolidayOverlay, WorkspaceEventOverlay } from '@/Components/charts/MultiSeriesLineChart';
 
@@ -86,6 +91,26 @@ interface UrlSummaryRow extends StoreUrlItem {
     desktop_seo_score: number | null;
     desktop_lcp_ms: number | null;
     last_checked_at: string | null;
+    monthly_orders: number;
+    revenue_risk: number;
+}
+
+interface PerformanceAudit {
+    id: string;
+    title: string;
+    description: string | null;
+    score: number | null;
+    weight: number;
+    display_value: string | null;
+}
+
+interface PerformanceAlert {
+    type: 'score_drop' | 'lcp_regression' | 'new_failing_audit';
+    severity: 'warning' | 'critical';
+    message: string;
+    url_id: number;
+    url_label: string;
+    delta: number;
 }
 
 interface Props extends PageProps {
@@ -102,12 +127,15 @@ interface Props extends PageProps {
     workspace_event_overlays: WorkspaceEventOverlay[];
     from: string;
     to: string;
+    revenue_at_risk: number;
+    performance_audits: PerformanceAudit[];
+    performance_alerts: PerformanceAlert[];
+    narrative: string | null;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 type ScoreGrade = 'good' | 'needs-improvement' | 'poor' | 'unknown';
-type CwvGrade   = ScoreGrade;
 
 function scoreGrade(score: number | null): ScoreGrade {
     if (score === null) return 'unknown';
@@ -131,45 +159,6 @@ function scoreBg(grade: ScoreGrade): string {
         case 'needs-improvement': return 'bg-amber-50  border-amber-200';
         case 'poor':              return 'bg-red-50    border-red-200';
         default:                  return 'bg-zinc-50   border-zinc-200';
-    }
-}
-
-function lcpGrade(ms: number | null): CwvGrade {
-    if (ms === null) return 'unknown';
-    if (ms <= 2500)  return 'good';
-    if (ms <= 4000)  return 'needs-improvement';
-    return 'poor';
-}
-
-function clsGrade(cls: number | null): CwvGrade {
-    if (cls === null) return 'unknown';
-    if (cls <= 0.1)  return 'good';
-    if (cls <= 0.25) return 'needs-improvement';
-    return 'poor';
-}
-
-function inpGrade(ms: number | null): CwvGrade {
-    if (ms === null) return 'unknown';
-    if (ms <= 200)   return 'good';
-    if (ms <= 500)   return 'needs-improvement';
-    return 'poor';
-}
-
-function cwvBadgeClass(grade: CwvGrade): string {
-    switch (grade) {
-        case 'good':              return 'bg-green-100 text-green-700';
-        case 'needs-improvement': return 'bg-amber-100 text-amber-700';
-        case 'poor':              return 'bg-red-100   text-red-700';
-        default:                  return 'bg-zinc-100  text-zinc-400';
-    }
-}
-
-function cwvGradeLabel(grade: CwvGrade): string {
-    switch (grade) {
-        case 'good':              return 'Good';
-        case 'needs-improvement': return 'Improve';
-        case 'poor':              return 'Poor';
-        default:                  return '—';
     }
 }
 
@@ -225,13 +214,15 @@ const CRUX_SOURCE_BADGE: Record<string, { label: string; className: string }> = 
 function CwvCard({
     label,
     value,
-    grade,
+    metric,
+    rawValue,
     description,
     source,
 }: {
     label: string;
     value: string;
-    grade: CwvGrade;
+    metric: CwvMetric | null;
+    rawValue: number | null;
     description: string;
     source?: string | null;
 }) {
@@ -246,9 +237,10 @@ function CwvCard({
                             {badge.label}
                         </span>
                     )}
-                    <span className={cn('rounded-full px-2 py-0.5 text-xs font-semibold', cwvBadgeClass(grade))}>
-                        {cwvGradeLabel(grade)}
-                    </span>
+                    {metric !== null
+                        ? <CwvBand metric={metric} value={rawValue} />
+                        : <span className="rounded-full px-2 py-0.5 text-xs font-semibold bg-zinc-100 text-zinc-400">—</span>
+                    }
                 </div>
             </div>
             <div className="text-xl font-semibold text-zinc-900 tabular-nums">{value}</div>
@@ -314,21 +306,24 @@ function StrategyColumn({
                                     <CwvCard
                                         label="LCP"
                                         value={fmtMs(lcpVal)}
-                                        grade={lcpGrade(lcpVal)}
+                                        metric="lcp"
+                                        rawValue={lcpVal}
                                         source={cwvSrc(scores.lcp_ms, scores.crux_lcp_p75_ms)}
                                         description="Largest Contentful Paint · ≤ 2.5 s"
                                     />
                                     <CwvCard
                                         label="CLS"
                                         value={fmtCls(clsVal)}
-                                        grade={clsGrade(clsVal)}
+                                        metric="cls"
+                                        rawValue={clsVal}
                                         source={cwvSrc(scores.cls_score, scores.crux_cls_p75)}
                                         description="Cumulative Layout Shift · ≤ 0.10"
                                     />
                                     <CwvCard
                                         label="INP"
                                         value={fmtMs(inpVal)}
-                                        grade={inpGrade(inpVal)}
+                                        metric="inp"
+                                        rawValue={inpVal}
                                         source={cwvSrc(scores.inp_ms, scores.crux_inp_p75_ms)}
                                         description={inpVal === null
                                             ? 'Interaction to Next Paint · no data (requires real users)'
@@ -337,7 +332,8 @@ function StrategyColumn({
                                     <CwvCard
                                         label="TTFB"
                                         value={fmtMs(ttfbVal)}
-                                        grade="unknown"
+                                        metric={null}
+                                        rawValue={ttfbVal}
                                         source={cwvSrc(scores.ttfb_ms, scores.crux_ttfb_p75_ms)}
                                         description="Time to First Byte"
                                     />
@@ -800,6 +796,113 @@ function UrlSelector({
     );
 }
 
+// ─── Alerts panel ─────────────────────────────────────────────────────────────
+
+function AlertsPanel({ alerts }: { alerts: PerformanceAlert[] }) {
+    const [open, setOpen] = useState(false);
+    if (alerts.length === 0) return null;
+
+    const criticalCount = alerts.filter((a) => a.severity === 'critical').length;
+
+    return (
+        <section className="space-y-2">
+            <button
+                onClick={() => setOpen((v) => !v)}
+                className="flex items-center gap-2 text-sm font-semibold text-zinc-700"
+            >
+                <span className={cn(
+                    'h-2 w-2 rounded-full',
+                    criticalCount > 0 ? 'bg-red-500' : 'bg-amber-400',
+                )} />
+                Performance Alerts ({alerts.length})
+                <ChevronDown className={cn('h-4 w-4 text-zinc-400 transition-transform', open && 'rotate-180')} />
+            </button>
+            {open && (
+                <div className="space-y-2">
+                    {alerts.map((alert, i) => (
+                        <div
+                            key={i}
+                            className={cn(
+                                'flex items-start gap-3 rounded-xl border p-4 text-sm',
+                                alert.severity === 'critical'
+                                    ? 'border-red-200 bg-red-50 text-red-800'
+                                    : 'border-amber-200 bg-amber-50 text-amber-800',
+                            )}
+                        >
+                            <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                            <div>
+                                <span className="font-semibold">{alert.url_label}: </span>
+                                {alert.message}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
+        </section>
+    );
+}
+
+// ─── Audit drill-down ─────────────────────────────────────────────────────────
+
+function AuditDrillDown({ audits }: { audits: PerformanceAudit[] }) {
+    const [open, setOpen] = useState(false);
+    if (audits.length === 0) return null;
+
+    return (
+        <section className="space-y-3">
+            <button
+                onClick={() => setOpen((v) => !v)}
+                className="section-label flex items-center gap-1.5"
+            >
+                Audit Opportunities
+                <ChevronDown className={cn('h-4 w-4 text-zinc-400 transition-transform', open && 'rotate-180')} />
+            </button>
+            {open && (
+                <div className="rounded-2xl border border-zinc-200 bg-white overflow-hidden">
+                    <table className="w-full text-sm">
+                        <thead>
+                            <tr className="border-b border-zinc-100 bg-zinc-50 text-left text-xs font-medium text-zinc-500">
+                                <th className="px-5 py-2.5">Audit</th>
+                                <th className="px-4 py-2.5 text-center w-16">Score</th>
+                                <th className="px-4 py-2.5 text-center w-16">Weight</th>
+                                <th className="px-4 py-2.5 text-right">Current</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-zinc-100">
+                            {audits.map((a) => (
+                                <tr key={a.id} className="hover:bg-zinc-50">
+                                    <td className="px-5 py-3">
+                                        <div className="font-medium text-zinc-800">{a.title}</div>
+                                        {a.description && (
+                                            <div className="text-xs text-zinc-400 mt-0.5 line-clamp-2">{a.description}</div>
+                                        )}
+                                    </td>
+                                    <td className="px-4 py-3 text-center">
+                                        <span className={cn(
+                                            'tabular-nums font-semibold',
+                                            a.score !== null && a.score < 0.5  ? 'text-red-600'
+                                            : a.score !== null && a.score < 0.9 ? 'text-amber-600'
+                                            : 'text-zinc-400',
+                                        )}>
+                                            {a.score !== null ? Math.round(a.score * 100) : '—'}
+                                        </span>
+                                    </td>
+                                    <td className="px-4 py-3 text-center text-xs text-zinc-400 tabular-nums">
+                                        {a.weight}
+                                    </td>
+                                    <td className="px-4 py-3 text-right text-xs text-zinc-500 tabular-nums">
+                                        {a.display_value ?? '—'}
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+        </section>
+    );
+}
+
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function PerformancePage({
@@ -816,10 +919,15 @@ export default function PerformancePage({
     workspace_event_overlays,
     from,
     to,
+    revenue_at_risk,
+    performance_audits,
+    performance_alerts,
+    narrative,
 }: Props) {
     const { workspace } = usePage<PageProps>().props;
-    const selectedUrl = store_urls.find((u) => u.id === selected_url_id);
-    const hasAnyData  = mobile_latest !== null || desktop_latest !== null;
+    const currency     = workspace?.reporting_currency ?? 'EUR';
+    const selectedUrl  = store_urls.find((u) => u.id === selected_url_id);
+    const hasAnyData   = mobile_latest !== null || desktop_latest !== null;
 
     function navigate(params: Record<string, string | number | undefined>) {
         router.get(wurl(workspace?.slug, '/performance'), params as Record<string, string>, { preserveState: true, replace: true });
@@ -859,6 +967,27 @@ export default function PerformancePage({
                         />
                     }
                 />
+
+                <PageNarrative text={narrative} />
+
+                {/* Regression alerts (collapsed by default) */}
+                <AlertsPanel alerts={performance_alerts} />
+
+                {/* Revenue at risk hero card (§F19) */}
+                <section className="space-y-3">
+                    <h2 className="section-label">Revenue Impact</h2>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                        <MetricCard
+                            label="Estimated Revenue at Risk"
+                            value={revenue_at_risk > 0
+                                ? formatCurrency(revenue_at_risk, currency)
+                                : formatCurrency(0, currency)}
+                            source="real"
+                            tooltip="Estimate based on comparing current 7-day conversion rate vs 28-day baseline. Floor at 0."
+                            subtext={revenue_at_risk === 0 ? 'No slowness-driven risk detected' : undefined}
+                        />
+                    </div>
+                </section>
 
                 {/* No data yet */}
                 {!hasAnyData ? (
@@ -941,6 +1070,9 @@ export default function PerformancePage({
                                 </section>
                             );
                         })()}
+
+                        {/* Audit drill-down (collapsed by default) */}
+                        <AuditDrillDown audits={performance_audits} />
                     </>
                 )}
 
@@ -950,13 +1082,15 @@ export default function PerformancePage({
                         <h2 className="section-label">
                             All Monitored URLs
                         </h2>
-                        <div className="rounded-2xl border border-zinc-200 bg-white overflow-hidden">
+                        <div className="rounded-2xl border border-zinc-200 bg-white overflow-x-auto">
                             <table className="w-full text-sm">
                                 <thead>
                                     <tr className="border-b border-zinc-100 bg-zinc-50 text-left">
                                         <th className="px-5 py-3 font-medium text-zinc-500">URL</th>
                                         <th className="px-4 py-3 font-medium text-zinc-500 text-center" colSpan={3}>Mobile</th>
                                         <th className="px-4 py-3 font-medium text-zinc-500 text-center" colSpan={2}>Desktop</th>
+                                        <th className="px-4 py-3 font-medium text-zinc-500 text-right">Monthly Orders</th>
+                                        <th className="px-4 py-3 font-medium text-zinc-500 text-right">Revenue Risk</th>
                                         <th className="px-4 py-3 font-medium text-zinc-500 text-right">Checked</th>
                                     </tr>
                                     <tr className="border-b border-zinc-100 bg-zinc-50/50 text-left">
@@ -966,6 +1100,8 @@ export default function PerformancePage({
                                         <th className="px-4 pb-2 text-xs font-normal text-zinc-400 text-center">INP</th>
                                         <th className="px-4 pb-2 text-xs font-normal text-zinc-400 text-center">Perf</th>
                                         <th className="px-4 pb-2 text-xs font-normal text-zinc-400 text-center">LCP</th>
+                                        <th />
+                                        <th />
                                         <th />
                                     </tr>
                                 </thead>
@@ -988,12 +1124,21 @@ export default function PerformancePage({
                                             <td className="px-4 py-3 text-center"><ScoreBadge score={row.mobile_performance_score} /></td>
                                             <td className="px-4 py-3 text-center text-zinc-600 tabular-nums text-xs">{fmtMs(row.mobile_lcp_ms)}</td>
                                             <td className="px-4 py-3 text-center">
-                                                <span className={cn('rounded px-1.5 py-0.5 text-xs font-medium tabular-nums', cwvBadgeClass(inpGrade(row.mobile_inp_ms)))}>
-                                                    {fmtMs(row.mobile_inp_ms)}
-                                                </span>
+                                                <CwvBand metric="inp" value={row.mobile_inp_ms} />
                                             </td>
                                             <td className="px-4 py-3 text-center"><ScoreBadge score={row.desktop_performance_score} /></td>
                                             <td className="px-4 py-3 text-center text-zinc-600 tabular-nums text-xs">{fmtMs(row.desktop_lcp_ms)}</td>
+                                            <td className="px-4 py-3 text-right tabular-nums text-zinc-700">
+                                                {row.monthly_orders > 0 ? row.monthly_orders : '—'}
+                                            </td>
+                                            <td className={cn(
+                                                'px-4 py-3 text-right tabular-nums text-sm font-medium',
+                                                row.revenue_risk > 0 ? 'text-amber-600' : 'text-zinc-300',
+                                            )}>
+                                                {row.revenue_risk > 0
+                                                    ? formatCurrency(row.revenue_risk, currency)
+                                                    : '—'}
+                                            </td>
                                             <td className="px-4 py-3 text-right text-zinc-400 text-xs">
                                                 {row.last_checked_at ? fmtDate(row.last_checked_at) : '—'}
                                             </td>
@@ -1002,7 +1147,6 @@ export default function PerformancePage({
                                 </tbody>
                             </table>
                         </div>
-                        <p className="text-xs text-zinc-400">Uptime monitoring — Phase 2+</p>
                     </section>
                 )}
             </div>

@@ -213,6 +213,8 @@ class DiscrepancyController extends Controller
             'from'       => $from,
             'to'         => $to,
             'platform'   => $platform,
+            // Discrepancy page is absorbed into Acquisition in Phase 3.5; no narrative method yet.
+            'narrative'  => null,
         ]);
     }
 }

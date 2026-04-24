@@ -6,54 +6,34 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Flat Plans
+    | Standard Plan (single plan, metered)
     |--------------------------------------------------------------------------
     |
-    | Two flat tiers: Starter (≤€5k/mo) and Growth (≤€25k/mo).
-    | Thresholds apply to GMV (has_store=true) or ad spend (has_store=false).
-    | When revenue exceeds Growth limit, the workspace moves to the Scale tier
-    | (metered billing — see scale_plan below).
+    | One plan for everyone: €39/mo minimum + 0.4% of monthly GMV.
+    | No tiers, no feature gates below Enterprise.
+    |
+    | Stripe setup:
+    |   - One metered price at €0.004 per EUR of GMV (price_id below).
+    |   - Usage reported monthly as max(gmv_eur, floor_quantity) where
+    |     floor_quantity = minimum_monthly / gmv_rate = 39 / 0.004 = 9 750 EUR.
+    |   - This ensures Stripe always charges at least €39 regardless of GMV.
+    |
+    | Billing basis (see ReportMonthlyRevenueToStripeJob):
+    |   - has_store = true  → GMV from daily_snapshots.revenue
+    |   - has_store = false → ad spend from ad_insights at campaign level
+    |   - Both store AND ads → GMV only
+    |
+    | DB plan key: 'standard' (workspaces.billing_plan CHECK constraint).
+    | Enterprise workspaces use billing_plan = 'enterprise' and are invoiced
+    | manually — they do not go through this Stripe metered flow.
     |
     */
 
-    'flat_plans' => [
-        'starter' => [
-            'price_id_monthly' => env('STRIPE_PRICE_STARTER_M'),
-            'price_id_annual'  => env('STRIPE_PRICE_STARTER_A'),
-            'revenue_limit'    => 5000,
-        ],
-        'growth' => [
-            'price_id_monthly' => env('STRIPE_PRICE_GROWTH_M'),
-            'price_id_annual'  => env('STRIPE_PRICE_GROWTH_A'),
-            'revenue_limit'    => 25000,
-        ],
-    ],
-
-    /*
-    |--------------------------------------------------------------------------
-    | Scale Plan (metered / percentage-based)
-    |--------------------------------------------------------------------------
-    |
-    | Stripe metered billing for high-volume workspaces (>€25k/mo).
-    | Revenue is always reported in EUR via fx_rates.
-    | Floor of €149/month enforced before reporting usage.
-    |
-    | Rates:
-    |   gmv_rate       — 1% of GMV for ecom workspaces (has_store=true)
-    |   ad_spend_rate  — 2% of ad spend for non-ecom workspaces (has_store=false)
-    |
-    | DB plan key: 'scale' (workspaces.billing_plan CHECK constraint).
-    | Annual billing is not available on the Scale tier (Stripe metered).
-    |
-    */
-
-    'scale_plan' => [
-        'price_id'             => env('STRIPE_PRICE_SCALE'),
-        'gmv_rate'             => 0.01,
-        'ad_spend_rate'        => 0.02,
-        'minimum_monthly'      => 149,
-        'revenue_threshold'    => 25000,
-        'enterprise_threshold' => 250000,
+    'plan' => [
+        'price_id'             => env('STRIPE_PRICE_ID'),
+        'gmv_rate'             => 0.004,   // 0.4% of GMV per month
+        'minimum_monthly'      => 39,      // €39/mo floor (enforced before reporting)
+        'enterprise_threshold' => 250000,  // monthly GMV (EUR) where we reach out for Enterprise
     ],
 
 ];

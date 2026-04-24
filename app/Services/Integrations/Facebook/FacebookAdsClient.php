@@ -7,6 +7,7 @@ namespace App\Services\Integrations\Facebook;
 use App\Exceptions\FacebookApiException;
 use App\Exceptions\FacebookRateLimitException;
 use App\Exceptions\FacebookTokenExpiredException;
+use Illuminate\Http\Client\Pool;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
@@ -208,6 +209,9 @@ class FacebookAdsClient
      * - frequency: average times a person saw the ad (stored in ad_insights.frequency)
      * - actions/action_values: purchase conversions + value (platform_conversions, platform_conversions_value)
      *   stored in raw_insights JSONB for non-promoted action types
+     * - video_*_watched_actions + outbound_clicks: stored in raw_insights for Motion Score (§F11)
+     *   NOTE: video fields are only populated for video ads. Static image ads will have null values.
+     *   3s and 10s video metrics NOT requested — both deprecated by Meta (10s: Jan 2026, 3s: Apr 2026).
      * - ctr/cpc are NOT requested — computed on the fly with NULLIF to avoid stale values
      *   See PLANNING.md "ad_insights — computed columns"
      *
@@ -236,7 +240,7 @@ class FacebookAdsClient
         // with 100 ads = 3,000 rows = 120 HTTP requests at default vs 6 at limit=500.
         $params = [
             'level'          => $level,
-            'fields'         => 'spend,impressions,clicks,reach,frequency,purchase_roas,actions,action_values,account_currency,campaign_id,adset_id,ad_id,date_start',
+            'fields'         => 'spend,impressions,clicks,reach,frequency,purchase_roas,actions,action_values,video_continuous_2_sec_watched_actions,video_15_sec_watched_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions,outbound_clicks,account_currency,campaign_id,adset_id,ad_id,date_start',
             'time_range'     => json_encode(['since' => $since, 'until' => $until]),
             'time_increment' => 1,
             'limit'          => 500,
@@ -252,6 +256,138 @@ class FacebookAdsClient
         }
 
         return $this->paginate("/act_{$externalAccountId}/insights", $params);
+    }
+
+    /**
+     * Fetch insights for multiple levels concurrently via pagination pool.
+     *
+     * Allows fetching campaign/adset/ad level insights in parallel instead of sequentially.
+     * Each request is independent; parallelization is safe per Meta's rate-limit model.
+     *
+     * @param  array<string, array{level: string, since: string, until: string, filterZeroImpressions?: bool}> $requests
+     * @return array<string, list<array<string, mixed>>> Rows keyed by the same key as $requests.
+     *
+     * @throws FacebookTokenExpiredException
+     * @throws FacebookRateLimitException
+     * @throws FacebookApiException
+     */
+    public function fetchInsightsPool(
+        string $externalAccountId,
+        array $requests,
+    ): array {
+        if ($requests === []) {
+            return [];
+        }
+
+        $accessToken = $this->accessToken;
+        $endpoint    = self::BASE_URL . "/act_{$externalAccountId}/insights";
+
+        /** @var array<string, \Illuminate\Http\Client\Response> $responses */
+        $responses = Http::pool(static function (Pool $pool) use ($requests, $endpoint, $accessToken): array {
+            $promises = [];
+
+            foreach ($requests as $key => $req) {
+                $level                = (string) $req['level'];
+                $since                = (string) $req['since'];
+                $until                = (string) $req['until'];
+                $filterZeroImpressions = (bool) ($req['filterZeroImpressions'] ?? false);
+
+                $params = [
+                    'level'          => $level,
+                    'fields'         => 'spend,impressions,clicks,reach,frequency,purchase_roas,actions,action_values,video_continuous_2_sec_watched_actions,video_15_sec_watched_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions,outbound_clicks,account_currency,campaign_id,adset_id,ad_id,date_start',
+                    'time_range'     => json_encode(['since' => $since, 'until' => $until]),
+                    'time_increment' => 1,
+                    'limit'          => 500,
+                    'access_token'   => $accessToken,
+                ];
+
+                if ($filterZeroImpressions) {
+                    $params['filtering'] = json_encode([
+                        ['field' => "{$level}.impressions", 'operator' => 'GREATER_THAN', 'value' => 0],
+                    ]);
+                }
+
+                $promises[] = $pool->as((string) $key)
+                    ->timeout(120)
+                    ->connectTimeout(10)
+                    ->retry(3, 2000, function (\Throwable $e): bool {
+                        return $e instanceof \Illuminate\Http\Client\ConnectionException;
+                    }, throw: false)
+                    ->get($endpoint, $params);
+            }
+
+            return $promises;
+        });
+
+        // First pass: detect token expiry / rate limits across the whole batch
+        $maxRetryAfter = 0;
+        $rateLimited   = false;
+
+        foreach ($responses as $response) {
+            if ($response instanceof \Throwable) {
+                throw new FacebookApiException('Facebook pool transport error: ' . $response->getMessage());
+            }
+
+            $body = $response->json();
+
+            if (isset($body['error'])) {
+                $code = (int) ($body['error']['code'] ?? 0);
+
+                if ($code === 190) {
+                    throw new FacebookTokenExpiredException();
+                }
+
+                if (in_array($code, self::RATE_LIMIT_CODES, strict: true)) {
+                    $rateLimited   = true;
+                    $maxRetryAfter = max($maxRetryAfter, (int) $response->header('Retry-After', 300) ?: 300);
+                }
+            }
+
+            if ($response->failed()) {
+                $rateLimited   = true;
+                $maxRetryAfter = max($maxRetryAfter, (int) $response->header('Retry-After', 300) ?: 300);
+            }
+        }
+
+        if ($rateLimited) {
+            Cache::put('facebook_api_throttled_until', now()->addSeconds($maxRetryAfter)->toISOString(), $maxRetryAfter + 60);
+            Cache::put('facebook_api_last_throttle_at', now()->toISOString(), 86400);
+            $hitKey = 'facebook_api_rate_limit_hits_' . now()->toDateString();
+            Cache::add($hitKey, 0, 172800);
+            Cache::increment($hitKey);
+
+            throw new FacebookRateLimitException($maxRetryAfter, usagePct: null);
+        }
+
+        $out        = [];
+        $successful = 0;
+
+        foreach ($responses as $key => $response) {
+            if (! $response->successful()) {
+                $body = $response->json();
+
+                if (isset($body['error'])) {
+                    $code    = (int) ($body['error']['code'] ?? 0);
+                    $message = (string) ($body['error']['message'] ?? "HTTP {$response->status()}");
+                    throw new FacebookApiException("Facebook API error {$code} for {$key}: {$message}");
+                }
+
+                throw new FacebookApiException("Facebook API error ({$response->status()}) for {$key}");
+            }
+
+            $successful++;
+            $out[(string) $key] = (array) ($response->json('data', []));
+        }
+
+        // Record successful calls for admin quota visibility
+        if ($successful > 0) {
+            Cache::put('facebook_api_last_success_at', now()->toISOString(), 86400);
+            $callKey = 'facebook_api_calls_' . now()->toDateString();
+            Cache::add($callKey, 0, 172800);
+            Cache::increment($callKey, $successful);
+        }
+
+        return $out;
     }
 
     // -------------------------------------------------------------------------
@@ -286,10 +422,11 @@ class FacebookAdsClient
         string $level = 'campaign',
     ): string {
         // Fields differ by level — adset/ad rows include their parent IDs so FK maps can be built.
+        $videoFields = 'video_continuous_2_sec_watched_actions,video_15_sec_watched_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions,outbound_clicks';
         $fields = match ($level) {
-            'adset'    => 'spend,impressions,clicks,reach,frequency,purchase_roas,actions,action_values,account_currency,campaign_id,adset_id,date_start',
-            'ad'       => 'spend,impressions,clicks,reach,frequency,purchase_roas,actions,action_values,account_currency,campaign_id,adset_id,ad_id,date_start',
-            default    => 'spend,impressions,clicks,reach,frequency,purchase_roas,actions,action_values,account_currency,campaign_id,date_start',
+            'adset'    => "spend,impressions,clicks,reach,frequency,purchase_roas,actions,action_values,{$videoFields},account_currency,campaign_id,adset_id,date_start",
+            'ad'       => "spend,impressions,clicks,reach,frequency,purchase_roas,actions,action_values,{$videoFields},account_currency,campaign_id,adset_id,ad_id,date_start",
+            default    => "spend,impressions,clicks,reach,frequency,purchase_roas,actions,action_values,{$videoFields},account_currency,campaign_id,date_start",
         };
 
         // POST triggers async job creation; Facebook returns report_run_id (not data rows).

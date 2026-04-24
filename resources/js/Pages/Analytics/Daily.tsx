@@ -79,6 +79,7 @@ interface Props {
     sort_by: string;
     sort_dir: 'asc' | 'desc';
     hide_empty: boolean;
+    narrative: string | null;
 }
 
 // ── Formatters ─────────────────────────────────────────────────────────────
@@ -210,7 +211,7 @@ function TotalsSummary({ totals, currency }: { totals: Totals; currency: string 
 // ── Main component ──────────────────────────────────────────────────────────
 
 export default function AnalyticsDaily({
-    rows, totals, hero, has_ads, from, to, store_ids, hide_empty,
+    rows, totals, hero, has_ads, from, to, store_ids, hide_empty, narrative,
 }: Props) {
     const { workspace } = usePage<PageProps>().props;
     const currency = workspace?.reporting_currency ?? 'EUR';
@@ -266,7 +267,7 @@ export default function AnalyticsDaily({
     return (
         <AppLayout dateRangePicker={<DateRangePicker />}>
             <Head title="Analytics — Daily Report" />
-            <PageHeader title="Analytics" subtitle="Daily breakdown" />
+            <PageHeader title="Analytics" subtitle="Daily breakdown" narrative={narrative} />
             <AnalyticsTabBar />
             <StoreFilter selectedStoreIds={store_ids} />
 

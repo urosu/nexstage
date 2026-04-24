@@ -41,21 +41,18 @@ const TEXT_COLOR: Record<FreshnessLevel, string> = {
 };
 
 /**
- * Per-page data freshness indicator — rendered in PageHeader on every page.
+ * Per-page data freshness indicator.
  *
- * Overall level: worst-case across all connected integrations. Tooltip shows
- * per-integration detail: "Store ✓ 14m | Facebook ✓ 8m | Google Ads ⚠ 2h".
+ * variant="dot" (default) — compact dot + text used in PageHeader.
+ * variant="strip" — full-width row of per-integration pills, used at the top
+ *   of the Home page (§ Home spec, Status strip section).
  *
- * Reads integrations_freshness from shared Inertia props (set in
- * HandleInertiaRequests::share()). If no integrations are connected, renders
- * nothing — the component is safe to always mount in PageHeader.
- *
- * Thresholds are imported from @/lib/syncStatus (FRESHNESS_THRESHOLDS) —
- * edit that file to change when green/amber/red trigger.
+ * Reads integrations_freshness from shared Inertia props (HandleInertiaRequests::share()).
+ * Safe to always mount — renders null when no integrations connected.
  *
  * @see PLANNING.md section 14.2
  */
-export function DataFreshness() {
+export function DataFreshness({ variant = 'dot' }: { variant?: 'dot' | 'strip' }) {
     const integrations = (usePage<PageProps>().props.integrations_freshness ?? []) as IntegrationFreshness[];
 
     const { overallLevel, summary } = useMemo(() => {
@@ -80,13 +77,34 @@ export function DataFreshness() {
 
     if (integrations.length === 0) return null;
 
-    // Use the most-recently-synced integration for the inline age label.
-    const mostRecent = [...integrations].sort((a, b) => {
-        if (!a.last_synced_at) return 1;
-        if (!b.last_synced_at) return -1;
-        return new Date(b.last_synced_at).getTime() - new Date(a.last_synced_at).getTime();
-    })[0];
+    if (variant === 'strip') {
+        return (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-zinc-100 bg-zinc-50 px-3 py-2 text-xs">
+                {integrations.map((int, i) => {
+                    const level = computeLevel(int);
+                    const ageLabel = level === 'green'
+                        ? formatAge(int.last_synced_at)
+                        : int.status === 'token_expired'
+                        ? 'Token expired'
+                        : (int.consecutive_sync_failures ?? 0) > 0
+                        ? `Failing (last ok ${formatAge(int.last_synced_at)})`
+                        : int.historical_import_status === 'failed'
+                        ? 'Import failed'
+                        : formatAge(int.last_synced_at);
 
+                    return (
+                        <span key={i} className="inline-flex items-center gap-1.5">
+                            <span className={cn('h-2 w-2 rounded-full flex-shrink-0', DOT_CLASS[level])} />
+                            <span className="text-zinc-600 font-medium">{int.label}</span>
+                            <span className={cn('tabular-nums', TEXT_COLOR[level])}>{ageLabel}</span>
+                        </span>
+                    );
+                })}
+            </div>
+        );
+    }
+
+    // Use the most-recently-synced integration for the inline age label.
     const inlineText = overallLevel === 'green'
         ? 'Up to date'
         : overallLevel === 'amber'

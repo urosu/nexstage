@@ -18,6 +18,7 @@ use App\Models\SearchConsoleProperty;
 use App\Models\Store;
 use App\Models\StoreUrl;
 use App\Models\Workspace;
+use App\Services\NarrativeTemplateService;
 use App\Services\WorkspaceContext;
 use Carbon\Carbon;
 use Illuminate\Http\RedirectResponse;
@@ -28,6 +29,10 @@ use Inertia\Response;
 
 class StoreController extends Controller
 {
+    public function __construct(
+        private readonly NarrativeTemplateService $narrative,
+    ) {}
+
     public function index(Request $request): Response
     {
         $workspaceId = app(WorkspaceContext::class)->id();
@@ -548,10 +553,27 @@ class StoreController extends Controller
                 ->all();
         }
 
+        // ── Narrative: use median performance_score and lcp_ms from monitored URLs ──
+        // Median is more robust than average for Lighthouse scores (outlier URLs shouldn't
+        // dominate). Only active URLs with scores are included.
+        $scoredUrls  = array_filter($urlData, fn ($u) => $u['performance_score'] !== null);
+        $scores      = array_column($scoredUrls, 'performance_score');
+        $lcps        = array_filter(array_column($scoredUrls, 'lcp_ms'), fn ($v) => $v !== null);
+        sort($scores);
+        sort($lcps);
+        $medianScore = count($scores) > 0
+            ? (int) round($scores[(int) floor((count($scores) - 1) / 2)])
+            : null;
+        $medianLcp   = count($lcps) > 0
+            ? (int) round($lcps[(int) floor((count($lcps) - 1) / 2)])
+            : null;
+        $pageNarrative = $this->narrative->forPerformance($medianScore, $medianLcp, null);
+
         return Inertia::render('Stores/Performance', [
             'store'           => $this->storeProps($store),
             'store_urls'      => $urlData,
             'gsc_suggestions' => $gscSuggestions,
+            'narrative'       => $pageNarrative,
         ]);
     }
 
@@ -729,6 +751,43 @@ class StoreController extends Controller
         return back()->with('success', 'Primary country updated.');
     }
 
+    /**
+     * Persist the store's cost settings (tax, shipping, fixed costs).
+     *
+     * Accepts a flat JSON-shaped body matching StoreCostSettings::fromArray().
+     * Only the sub-keys provided are updated — missing keys retain their defaults
+     * because fromArray() always applies defaults.
+     */
+    public function updateCostSettings(Request $request, string $storeSlug): RedirectResponse
+    {
+        $store = $this->resolveStore($storeSlug);
+
+        $this->authorize('update', $store);
+
+        $validated = $request->validate([
+            'tax.deduct_tax'                    => ['sometimes', 'boolean'],
+            'tax.default_tax_rate'              => ['sometimes', 'nullable', 'numeric', 'min:0', 'max:100'],
+            'tax.country_tax_rates'             => ['sometimes', 'array'],
+            'tax.country_tax_rates.*'           => ['numeric', 'min:0', 'max:100'],
+            'tax.zero_tax_is_b2b'               => ['sometimes', 'boolean'],
+            'shipping.cost_mode'                => ['sometimes', 'in:order,flat,percentage'],
+            'shipping.flat_rate'                => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'shipping.percentage'               => ['sometimes', 'nullable', 'numeric', 'min:0', 'max:10'],
+            'fixed_monthly_costs'               => ['sometimes', 'array'],
+            'fixed_monthly_costs.*.name'        => ['required_with:fixed_monthly_costs.*', 'string', 'max:100'],
+            'fixed_monthly_costs.*.amount'      => ['required_with:fixed_monthly_costs.*', 'numeric', 'min:0'],
+            'fixed_monthly_costs.*.currency'    => ['required_with:fixed_monthly_costs.*', 'string', 'size:3'],
+            'cogs'                                    => ['sometimes', 'array'],
+            'cogs.custom_meta_keys'                   => ['sometimes', 'array', 'max:10'],
+            'cogs.custom_meta_keys.*.key'             => ['required_with:cogs.custom_meta_keys.*', 'string', 'max:100', 'regex:/^[a-zA-Z0-9_]+$/'],
+            'cogs.custom_meta_keys.*.value_type'      => ['required_with:cogs.custom_meta_keys.*', 'in:unit,total'],
+        ]);
+
+        $store->update(['cost_settings' => $validated]);
+
+        return back()->with('success', 'Cost settings saved.');
+    }
+
     // ── Private helpers ───────────────────────────────────────────────────────
 
     private function resolveStore(string $slug): Store
@@ -843,6 +902,7 @@ class StoreController extends Controller
             'type'                 => $store->type,
             'primary_country_code' => $store->primary_country_code,
             'website_url'          => $store->website_url,
+            'cost_settings'        => $store->cost_settings->toArray(),
         ];
     }
 }

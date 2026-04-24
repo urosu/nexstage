@@ -17,6 +17,8 @@ class DatabaseSeeder extends Seeder
             ChannelMappingsSeeder::class,
             FxRateSeeder::class,
             CommercialEventsSeeder::class,
+            GscCtrBenchmarksSeeder::class,
+            CreativeTagSeeder::class,
         ]);
 
         // Dev/staging only — creates fake users, workspaces, orders, ads, and snapshots.

@@ -10,6 +10,8 @@ use Carbon\Carbon;
 use App\Models\StoreUrl;
 use App\Models\Workspace;
 use App\Models\WorkspaceEvent;
+use App\Services\NarrativeTemplateService;
+use App\Services\PerformanceMonitoring\PerformanceRevenueService;
 use App\Services\WorkspaceContext;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -19,7 +21,8 @@ use Inertia\Response;
  * Performance page — Lighthouse / PageSpeed Insights data.
  *
  * Triggered by: GET /performance
- * Reads from:   store_urls, lighthouse_snapshots, holidays, workspace_events
+ * Reads from:   store_urls, lighthouse_snapshots, gsc_pages, orders,
+ *               search_console_properties, holidays, workspace_events
  * Writes to:    nothing
  *
  * Both mobile and desktop strategies are returned simultaneously so the page
@@ -30,9 +33,15 @@ use Inertia\Response;
  * See: PLANNING.md "Performance Monitoring — Performance page"
  * Related: app/Jobs/RunLighthouseCheckJob.php
  * Related: app/Models/LighthouseSnapshot.php
+ * Related: app/Services/PerformanceMonitoring/PerformanceRevenueService.php
  */
 class PerformanceController extends Controller
 {
+    public function __construct(
+        private readonly PerformanceRevenueService $revenue,
+        private readonly NarrativeTemplateService  $narrativeService,
+    ) {}
+
     public function __invoke(Request $request): Response
     {
         $workspaceId = app(WorkspaceContext::class)->id();
@@ -81,6 +90,10 @@ class PerformanceController extends Controller
                 'workspace_event_overlays' => [],
                 'from'                     => $from,
                 'to'                       => $to,
+                'revenue_at_risk'          => 0.0,
+                'performance_audits'       => [],
+                'performance_alerts'       => [],
+                'narrative'                => null,
             ]);
         }
 
@@ -185,24 +198,33 @@ class PerformanceController extends Controller
         $mobileHistory  = $historyRows->where('strategy', 'mobile')->values()->map($mapHistory)->all();
         $desktopHistory = $historyRows->where('strategy', 'desktop')->values()->map($mapHistory)->all();
 
-        // ── URL summary table: latest mobile + desktop scores per URL ──────────
-        $urlSummary = array_map(static function (array $su) use ($latestPerUrlStrategy): array {
-            $mobile  = $latestPerUrlStrategy->get($su['id'] . '_mobile');
-            $desktop = $latestPerUrlStrategy->get($su['id'] . '_desktop');
+        // ── Revenue and risk enrichment (§F18, §F19) ─────────────────────────
+        $riskData         = $this->revenue->revenueAtRisk($workspaceId, $storeUrls);
+        $monthlyOrdersMap = $this->revenue->monthlyOrdersPerUrl($workspaceId, $storeUrls);
 
-            return [
-                ...$su,
-                'mobile_performance_score'  => $mobile?->performance_score,
-                'mobile_seo_score'          => $mobile?->seo_score,
-                'mobile_lcp_ms'             => $mobile?->lcp_ms,
-                'mobile_inp_ms'             => $mobile?->inp_ms,
-                'desktop_performance_score' => $desktop?->performance_score,
-                'desktop_seo_score'         => $desktop?->seo_score,
-                'desktop_lcp_ms'            => $desktop?->lcp_ms,
-                'last_checked_at'           => $mobile?->checked_at?->toISOString()
-                    ?? $desktop?->checked_at?->toISOString(),
-            ];
-        }, $storeUrls);
+        // ── URL summary table: latest mobile + desktop scores per URL ──────────
+        $urlSummary = array_map(
+            function (array $su) use ($latestPerUrlStrategy, $riskData, $monthlyOrdersMap): array {
+                $mobile  = $latestPerUrlStrategy->get($su['id'] . '_mobile');
+                $desktop = $latestPerUrlStrategy->get($su['id'] . '_desktop');
+
+                return [
+                    ...$su,
+                    'mobile_performance_score'  => $mobile?->performance_score,
+                    'mobile_seo_score'          => $mobile?->seo_score,
+                    'mobile_lcp_ms'             => $mobile?->lcp_ms,
+                    'mobile_inp_ms'             => $mobile?->inp_ms,
+                    'desktop_performance_score' => $desktop?->performance_score,
+                    'desktop_seo_score'         => $desktop?->seo_score,
+                    'desktop_lcp_ms'            => $desktop?->lcp_ms,
+                    'last_checked_at'           => $mobile?->checked_at?->toISOString()
+                        ?? $desktop?->checked_at?->toISOString(),
+                    'monthly_orders'            => $monthlyOrdersMap[$su['id']] ?? 0,
+                    'revenue_risk'              => $riskData['per_url'][$su['id']] ?? 0.0,
+                ];
+            },
+            $storeUrls,
+        );
 
         // ── Event overlays ────────────────────────────────────────────────────
         $leadDays        = $workspace->workspace_settings->holidayLeadDays;
@@ -257,6 +279,31 @@ class PerformanceController extends Controller
             $desktopLatestRow,
         );
 
+        // ── Audit drill-down for selected URL ─────────────────────────────────
+        $selectedMobileWithRaw = LighthouseSnapshot::withoutGlobalScopes()
+            ->where('workspace_id', $workspaceId)
+            ->where('store_url_id', $selectedUrlId)
+            ->where('strategy', 'mobile')
+            ->orderByDesc('checked_at')
+            ->select(['raw_response'])
+            ->first();
+
+        $performanceAudits = $this->buildAuditList($selectedMobileWithRaw);
+
+        // ── Regression alerts ─────────────────────────────────────────────────
+        $performanceAlerts = $this->buildPerformanceAlerts(
+            $workspaceId,
+            $storeUrls,
+            $latestPerUrlStrategy,
+        );
+
+        // ── Page narrative (§NarrativeTemplateService::forPerformance) ────────
+        $narrative = $this->narrativeService->forPerformance(
+            $mobileLatest['performance_score'] ?? null,
+            $mobileLatest['lcp_ms'] ?? null,
+            $riskData['total'] > 0 ? (float) $riskData['total'] : null,
+        );
+
         return Inertia::render('Performance/Index', [
             'store_urls'               => $storeUrls,
             'selected_url_id'          => $selectedUrlId,
@@ -271,6 +318,10 @@ class PerformanceController extends Controller
             'workspace_event_overlays' => $workspaceEventOverlays,
             'from'                     => $from,
             'to'                       => $to,
+            'revenue_at_risk'          => $riskData['total'],
+            'performance_audits'       => $performanceAudits,
+            'performance_alerts'       => $performanceAlerts,
+            'narrative'                => $narrative,
         ]);
     }
 
@@ -365,5 +416,195 @@ class PerformanceController extends Controller
             'mobile'  => $build($mobileLatestRow,  $priorRows->get('mobile')),
             'desktop' => $build($desktopLatestRow, $priorRows->get('desktop')),
         ];
+    }
+
+    /**
+     * Parse the top failing audits from a Lighthouse snapshot's raw_response.
+     *
+     * Sorted by (weight × (1 − score)) descending — highest score-impact first,
+     * matching DebugBear's "sorted by impact" presentation.
+     * Returns at most 15 audits to avoid overwhelming the UI.
+     *
+     * @return array<int, array{id: string, title: string, description: string|null, score: float|null, weight: float, display_value: string|null}>
+     */
+    private function buildAuditList(?LighthouseSnapshot $snap): array
+    {
+        if ($snap === null || $snap->raw_response === null) {
+            return [];
+        }
+
+        $lr        = $snap->raw_response['lighthouseResult'] ?? [];
+        $auditRefs = $lr['categories']['performance']['auditRefs'] ?? [];
+        $allAudits = $lr['audits'] ?? [];
+
+        // Build weight map: auditId → weight (only audits that affect the score).
+        $weights = [];
+        foreach ($auditRefs as $ref) {
+            if (isset($ref['id'], $ref['weight']) && $ref['weight'] > 0) {
+                $weights[$ref['id']] = (float) $ref['weight'];
+            }
+        }
+
+        $results = [];
+        foreach ($weights as $id => $weight) {
+            $audit = $allAudits[$id] ?? null;
+            if ($audit === null) {
+                continue;
+            }
+
+            $score = isset($audit['score']) ? (float) $audit['score'] : null;
+
+            // Skip passing audits (score ≥ 0.9) and informational items (null score).
+            if ($score === null || $score >= 0.9) {
+                continue;
+            }
+
+            $results[] = [
+                'id'            => $id,
+                'title'         => $audit['title']       ?? $id,
+                'description'   => $audit['description'] ?? null,
+                'score'         => $score,
+                'weight'        => $weight,
+                'display_value' => $audit['displayValue'] ?? null,
+            ];
+        }
+
+        // Sort descending by impact: weight × (1 − score).
+        usort($results, static fn ($a, $b) =>
+            ($b['weight'] * (1 - ($b['score'] ?? 1))) <=> ($a['weight'] * (1 - ($a['score'] ?? 1)))
+        );
+
+        return array_slice($results, 0, 15);
+    }
+
+    /**
+     * Detect performance regressions by comparing the latest snapshot against
+     * the most recent snapshot from the 7–14 day prior window.
+     *
+     * Three alert types (Uptime <99.5% deferred to Phase 5):
+     *   score_drop      — performance_score dropped >10 pts
+     *   lcp_regression  — LCP increased >500ms
+     *   new_failing_audit — new audits with score < 0.9 vs 7 days ago
+     *
+     * Alerts are ephemeral (computed per request) — not written to the alerts table,
+     * which is for durable anomaly signals with review workflow.
+     *
+     * @param  \Illuminate\Support\Collection<string, LighthouseSnapshot> $latestPerUrlStrategy
+     * @return array<int, array{type: string, severity: string, message: string, url_id: int, url_label: string, delta: int|float}>
+     */
+    private function buildPerformanceAlerts(
+        int $workspaceId,
+        array $storeUrls,
+        \Illuminate\Support\Collection $latestPerUrlStrategy,
+    ): array {
+        if (empty($storeUrls)) {
+            return [];
+        }
+
+        $allUrlIds = array_column($storeUrls, 'id');
+
+        // Prior snapshots: most recent mobile snapshot per URL in the 7–14 day window.
+        $priorRows = LighthouseSnapshot::withoutGlobalScopes()
+            ->where('workspace_id', $workspaceId)
+            ->whereIn('store_url_id', $allUrlIds)
+            ->where('strategy', 'mobile')
+            ->whereBetween('checked_at', [
+                now()->subDays(14)->startOfDay(),
+                now()->subDays(7)->endOfDay(),
+            ])
+            ->selectRaw('
+                DISTINCT ON (store_url_id)
+                store_url_id,
+                performance_score,
+                lcp_ms,
+                raw_response
+            ')
+            ->orderByRaw('store_url_id, checked_at DESC')
+            ->get()
+            ->keyBy('store_url_id');
+
+        $alerts = [];
+
+        foreach ($storeUrls as $su) {
+            $latest = $latestPerUrlStrategy->get($su['id'] . '_mobile');
+            $prior  = $priorRows->get($su['id']);
+            $label  = $su['label'] ?? $su['url'];
+
+            if ($latest === null || $prior === null) {
+                continue;
+            }
+
+            // (a) Performance score drop > 10 pts.
+            if ($latest->performance_score !== null && $prior->performance_score !== null) {
+                $drop = $prior->performance_score - $latest->performance_score;
+                if ($drop > 10) {
+                    $alerts[] = [
+                        'type'      => 'score_drop',
+                        'severity'  => $drop > 20 ? 'critical' : 'warning',
+                        'message'   => "Performance score dropped {$drop} pts (now {$latest->performance_score})",
+                        'url_id'    => $su['id'],
+                        'url_label' => $label,
+                        'delta'     => $drop,
+                    ];
+                }
+            }
+
+            // (b) LCP regression > 500 ms.
+            if ($latest->lcp_ms !== null && $prior->lcp_ms !== null) {
+                $regression = $latest->lcp_ms - $prior->lcp_ms;
+                if ($regression > 500) {
+                    $alerts[] = [
+                        'type'      => 'lcp_regression',
+                        'severity'  => 'warning',
+                        'message'   => 'LCP increased by ' . number_format($regression / 1000, 1) . 's',
+                        'url_id'    => $su['id'],
+                        'url_label' => $label,
+                        'delta'     => $regression,
+                    ];
+                }
+            }
+
+            // (c) Newly failing audits vs 7 days ago.
+            if ($latest->raw_response !== null && $prior->raw_response !== null) {
+                $latestFailing = $this->failingAuditIds($latest->raw_response);
+                $priorFailing  = $this->failingAuditIds($prior->raw_response);
+                $newlyFailing  = array_diff($latestFailing, $priorFailing);
+
+                if (count($newlyFailing) > 0) {
+                    $n = count($newlyFailing);
+                    $alerts[] = [
+                        'type'      => 'new_failing_audit',
+                        'severity'  => 'warning',
+                        'message'   => "{$n} new failing " . ($n === 1 ? 'audit' : 'audits') . ' vs 7 days ago',
+                        'url_id'    => $su['id'],
+                        'url_label' => $label,
+                        'delta'     => $n,
+                    ];
+                }
+            }
+        }
+
+        return $alerts;
+    }
+
+    /**
+     * Returns audit IDs with score < 0.9 from a raw_response array (already decoded).
+     *
+     * @param  array<string, mixed> $rawResponse
+     * @return string[]
+     */
+    private function failingAuditIds(array $rawResponse): array
+    {
+        $audits  = $rawResponse['lighthouseResult']['audits'] ?? [];
+        $failing = [];
+
+        foreach ($audits as $id => $audit) {
+            $score = $audit['score'] ?? null;
+            if ($score !== null && (float) $score < 0.9) {
+                $failing[] = $id;
+            }
+        }
+
+        return $failing;
     }
 }

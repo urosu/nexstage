@@ -21,7 +21,7 @@ use Illuminate\Support\Facades\Log;
 /**
  * Imports the full order history for a Shopify store.
  *
- * Queue:   imports
+ * Queue:   imports-store
  * Timeout: 7200 s (2 hours)
  * Tries:   3
  *
@@ -52,7 +52,7 @@ class ShopifyHistoricalImportJob implements ShouldQueue
         private readonly int  $workspaceId,
         private ?int          $syncLogId = null,
     ) {
-        $this->onQueue('imports');
+        $this->onQueue('imports-store');
     }
 
     public function handle(): void

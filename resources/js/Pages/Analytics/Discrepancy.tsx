@@ -62,6 +62,7 @@ interface Props {
     from: string;
     to: string;
     platform: string;
+    narrative: string | null;
 }
 
 // ── Platform badge ──────────────────────────────────────────────────────────
@@ -89,7 +90,7 @@ export default function Discrepancy(props: Props) {
     const currency = workspace?.reporting_currency ?? 'EUR';
     const [navigating, setNavigating] = useState(() => _inertiaNavigating);
 
-    const { campaigns, chart_data, hero, from, to, platform } = props;
+    const { campaigns, chart_data, hero, from, to, platform, narrative } = props;
 
     useEffect(() => {
         const off1 = router.on('start', () => setNavigating(true));
@@ -112,7 +113,7 @@ export default function Discrepancy(props: Props) {
     return (
         <AppLayout dateRangePicker={<DateRangePicker />}>
             <Head title="Discrepancy — Platform vs Real" />
-            <PageHeader title="Discrepancy" subtitle="Where do your ad platforms disagree with your store data?" />
+            <PageHeader title="Discrepancy" subtitle="Where do your ad platforms disagree with your store data?" narrative={narrative} />
 
             {/* ── iOS14 explanation banner ────────────────────────────────────── */}
             <div className="mb-4 flex items-start gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">

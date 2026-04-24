@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use App\Jobs\CleanupOldSyncLogsJob;
 use App\Jobs\ComputeProductAffinitiesJob;
+use App\Jobs\DispatchDailyDigestsJob;
 use App\Jobs\GenerateMonthlyReportJob;
 use App\Jobs\SyncShopifyInventorySnapshotJob;
 use App\Jobs\SyncShopifyOrdersJob;
@@ -23,6 +24,7 @@ use App\Jobs\DetectStockTransitionsJob;
 use App\Jobs\DispatchDailySnapshots;
 use App\Jobs\DispatchHourlySnapshots;
 use App\Jobs\GenerateAiSummaryJob;
+use App\Jobs\TagCreativesWithAiJob;
 use App\Jobs\PurgeDeletedWorkspaceJob;
 use App\Jobs\RefreshOAuthTokenJob;
 use App\Jobs\ReportMonthlyRevenueToStripeJob;
@@ -104,6 +106,25 @@ Schedule::call(static function (): void {
                 ->delay(now()->addMinutes($delayMinutes));
         });
 })->dailyAt('01:00')->name('dispatch-ai-summaries')->withoutOverlapping(10);
+
+// ---------------------------------------------------------------------------
+// Creative tagging — 02:30 UTC, staggered 30 min, workspaces with active ads only.
+// Classifies ad creatives into the 8-category taxonomy using claude-sonnet-4-6.
+// Processes up to 20 ads per workspace per run (sorted by spend desc); dispatches
+// itself for the next batch when more remain. Writes to ad_creative_tags.
+// ---------------------------------------------------------------------------
+
+Schedule::call(static function (): void {
+    Workspace::withoutGlobalScope(WorkspaceScope::class)
+        ->whereNull('deleted_at')
+        ->where('has_ads', true)
+        ->whereRaw('NOT (trial_ends_at < NOW() AND billing_plan IS NULL)')
+        ->select(['id'])
+        ->each(static function (Workspace $workspace): void {
+            TagCreativesWithAiJob::dispatch($workspace->id)
+                ->delay(now()->addMinutes($workspace->id % 30));
+        });
+})->dailyAt('02:30')->name('dispatch-creative-tagging')->withoutOverlapping(10);
 
 // ---------------------------------------------------------------------------
 // Billing
@@ -414,6 +435,18 @@ Schedule::call(static function (): void {
     SeedCommercialEventsJob::dispatch($year)->onQueue('low');
     SeedCommercialEventsJob::dispatch($year + 1)->onQueue('low');
 })->monthlyOn(1, '00:20')->name('seed-commercial-events')->withoutOverlapping(10);
+
+// ---------------------------------------------------------------------------
+// Daily digest — hourly check; dispatches SendDailyDigestJob per workspace
+// whose local clock reads 5am. Cache-based dedup (25h TTL) prevents double-sends.
+// Opt-in via notification_preferences (channel='email', delivery_mode='daily_digest'
+// or 'weekly_digest'). Weekly Monday variant sends last-7-days summary.
+// ---------------------------------------------------------------------------
+
+Schedule::call(new DispatchDailyDigestsJob())
+    ->hourly()
+    ->name('dispatch-daily-digests')
+    ->withoutOverlapping(10);
 
 // ---------------------------------------------------------------------------
 // Holiday notifications — daily at 09:00 UTC

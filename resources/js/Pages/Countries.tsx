@@ -99,6 +99,7 @@ interface Props {
     filter: 'all' | 'winners' | 'losers';
     classifier: 'peer' | 'period' | null;
     active_classifier: 'peer' | 'period';
+    narrative: string | null;
 }
 
 // ── Page ─────────────────────────────────────────────────────────────────────
@@ -112,6 +113,7 @@ export default function Countries(props: Props) {
         countries, countries_total_count, has_ads, hero,
         top_products, selected_country,
         from, to, store_ids, sort_by, sort_dir, filter, active_classifier,
+        narrative,
     } = props;
 
     useEffect(() => {
@@ -159,7 +161,7 @@ export default function Countries(props: Props) {
     return (
         <AppLayout dateRangePicker={<DateRangePicker />}>
             <Head title="Analytics — By Country" />
-            <PageHeader title="Analytics" subtitle="Revenue by country" />
+            <PageHeader title="Analytics" subtitle="Revenue by country" narrative={narrative} />
             <AnalyticsTabBar />
             <StoreFilter selectedStoreIds={store_ids} />
 

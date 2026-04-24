@@ -107,73 +107,62 @@ class AdminController extends Controller
             ->count();
 
         // ── SaaS revenue metrics ───────────────────────────────────────────────
-        // Flat plan monthly prices (EUR). Scale (metered) and enterprise excluded from flat calc.
-        $planPrices = ['starter' => 29, 'growth' => 59];
+        // Single plan: €39/mo min + 0.4% GMV (metered). Enterprise invoiced manually.
+        $planConfig      = config('billing.plan');
+        $gmvRate         = (float) ($planConfig['gmv_rate'] ?? 0.004);
+        $minimumMonthly  = (float) ($planConfig['minimum_monthly'] ?? 39);
 
-        $flatMrr = 0;
-        foreach ($planPrices as $plan => $price) {
-            $flatMrr += (int) ($planBreakdown[$plan] ?? 0) * $price;
-        }
-
-        // Scale tier: metered. Use GMV rate (1%) as the estimate — actual bills vary per workspace basis.
-        $scalePlan     = config('billing.scale_plan');
-        $percentageRate  = (float) $scalePlan['gmv_rate'];
-        $percentageFloor = (float) $scalePlan['minimum_monthly'];
-
-        $percentageWsIds = Workspace::withoutGlobalScopes()
+        $standardWsIds = Workspace::withoutGlobalScopes()
             ->whereNull('deleted_at')
-            ->where('billing_plan', 'scale')
+            ->where('billing_plan', 'standard')
             ->select(['id'])
             ->pluck('id');
 
         $lastMonthStart = $now->copy()->subMonthNoOverflow()->startOfMonth()->toDateString();
         $lastMonthEnd   = $now->copy()->subMonthNoOverflow()->endOfMonth()->toDateString();
 
-        $percentageMrr = 0.0;
-        if ($percentageWsIds->isNotEmpty()) {
+        $mrr = 0.0;
+        if ($standardWsIds->isNotEmpty()) {
             $lastMonthRevenue = DailySnapshot::withoutGlobalScopes()
-                ->whereIn('workspace_id', $percentageWsIds)
+                ->whereIn('workspace_id', $standardWsIds)
                 ->whereBetween('date', [$lastMonthStart, $lastMonthEnd])
                 ->selectRaw('workspace_id, SUM(revenue) as total')
                 ->groupBy('workspace_id')
                 ->pluck('total', 'workspace_id');
 
-            foreach ($percentageWsIds as $wsId) {
+            foreach ($standardWsIds as $wsId) {
                 $wsRevenue = (float) ($lastMonthRevenue[$wsId] ?? 0);
-                $percentageMrr += max($wsRevenue * $percentageRate, $percentageFloor);
+                $mrr += max($wsRevenue * $gmvRate, $minimumMonthly);
             }
         }
 
         $enterpriseCount = (int) ($planBreakdown['enterprise'] ?? 0);
-        $mrr  = $flatMrr + $percentageMrr;
         $arr  = $mrr * 12;
         $arpa = $paying > 0 ? $mrr / $paying : 0;
 
-        // Next-month estimate: flat stays the same; % tier uses current month revenue extrapolated
+        // Next-month estimate: extrapolate current-month GMV to full month.
         $thisMonthStart = $now->copy()->startOfMonth()->toDateString();
         $thisMonthEnd   = $now->toDateString();
         $dayOfMonth     = (int) $now->day;
         $daysInMonth    = (int) $now->daysInMonth;
 
-        $projectedPercentageMrr = 0.0;
-        if ($percentageWsIds->isNotEmpty() && $dayOfMonth > 0) {
+        $nextMonthEstimate = 0.0;
+        if ($standardWsIds->isNotEmpty() && $dayOfMonth > 0) {
             $thisMonthRevenue = DailySnapshot::withoutGlobalScopes()
-                ->whereIn('workspace_id', $percentageWsIds)
+                ->whereIn('workspace_id', $standardWsIds)
                 ->whereBetween('date', [$thisMonthStart, $thisMonthEnd])
                 ->selectRaw('workspace_id, SUM(revenue) as total')
                 ->groupBy('workspace_id')
                 ->pluck('total', 'workspace_id');
 
-            foreach ($percentageWsIds as $wsId) {
-                $soFar       = (float) ($thisMonthRevenue[$wsId] ?? 0);
+            foreach ($standardWsIds as $wsId) {
+                $soFar        = (float) ($thisMonthRevenue[$wsId] ?? 0);
                 $extrapolated = ($soFar / $dayOfMonth) * $daysInMonth;
-                $projectedPercentageMrr += max($extrapolated * $percentageRate, $percentageFloor);
+                $nextMonthEstimate += max($extrapolated * $gmvRate, $minimumMonthly);
             }
         } else {
-            $projectedPercentageMrr = $percentageMrr;
+            $nextMonthEstimate = $mrr;
         }
-
-        $nextMonthEstimate = $flatMrr + $projectedPercentageMrr;
 
         // Recent workspace signups (last 30 days)
         $recentWorkspaces = Workspace::withoutGlobalScopes()
@@ -199,10 +188,8 @@ class AdminController extends Controller
                 'arr'                 => round($arr, 2),
                 'arpa'                => round($arpa, 2),
                 'next_month_estimate' => round($nextMonthEstimate, 2),
-                'flat_mrr'            => round($flatMrr, 2),
-                'percentage_mrr'      => round($percentageMrr, 2),
                 'enterprise_count'    => $enterpriseCount,
-                'percentage_ws_count' => $percentageWsIds->count(),
+                'standard_ws_count'   => $standardWsIds->count(),
             ],
             'stats' => [
                 'workspaces' => [
@@ -526,7 +513,7 @@ class AdminController extends Controller
     public function setPlan(Request $request, Workspace $workspace): RedirectResponse
     {
         $validated = $request->validate([
-            'billing_plan' => 'required|string|in:starter,growth,scale,enterprise',
+            'billing_plan' => 'required|string|in:standard,enterprise',
         ]);
 
         $workspace->update(['billing_plan' => $validated['billing_plan']]);
@@ -767,7 +754,9 @@ class AdminController extends Controller
             'sync-google-search',
             'sync-store',
             'sync-psi',
-            'imports',
+            'imports-store',
+            'imports-ads',
+            'imports-gsc',
             'default',
             'low',
         ];

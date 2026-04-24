@@ -93,13 +93,13 @@ class OnboardingController extends Controller
             $isReimport      = $store->historical_import_completed_at !== null;
 
             if ($importStatus === 'completed' && ! $request->boolean('add_store')) {
-                return redirect("/{$workspace->slug}/dashboard");
+                return redirect("/{$workspace->slug}");
             }
 
             // Re-import: store has already completed onboarding once. Send user back to
             // the dashboard/integrations page — progress is polled from there, not here.
             if ($isReimport && in_array($importStatus, ['pending', 'running'], true)) {
-                return redirect("/{$workspace->slug}/dashboard");
+                return redirect("/{$workspace->slug}");
             }
 
             // add_store=true: show tiles again so user can connect another store.

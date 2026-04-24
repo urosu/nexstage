@@ -1,5 +1,6 @@
 import { Info } from 'lucide-react';
 import { Link } from '@inertiajs/react';
+import type { ReactNode } from 'react';
 
 /**
  * Inline info icon that shows a balloon tooltip on hover.
@@ -9,11 +10,25 @@ import { Link } from '@inertiajs/react';
  * When helpLink is provided the balloon becomes interactive so the user can
  * click the "Learn more" link. The balloon stays visible while the cursor is
  * inside it because it is a child of the .group container.
+ *
+ * When children are provided they replace the default info icon as the hover
+ * trigger — useful for turning an arbitrary element (dot, text, image) into a
+ * tooltip target.
  */
-export function InfoTooltip({ content, helpLink }: { content: string; helpLink?: string }) {
+export function InfoTooltip({
+    content,
+    helpLink,
+    children,
+}: {
+    content: ReactNode;
+    helpLink?: string;
+    children?: ReactNode;
+}) {
     return (
         <span className="group relative inline-flex items-center cursor-default">
-            <Info className="h-3.5 w-3.5 text-zinc-300 group-hover:text-zinc-500 transition-colors" />
+            {children ?? (
+                <Info className="h-3.5 w-3.5 text-zinc-300 group-hover:text-zinc-500 transition-colors" />
+            )}
             {/* Balloon */}
             <span
                 className={[

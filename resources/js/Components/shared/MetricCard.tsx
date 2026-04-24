@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { InfoTooltip } from './Tooltip';
+import { TargetStatusDot, computeTargetStatus, TargetStatusDirection } from './TargetStatusDot';
 
 // ---------------------------------------------------------------------------
 // Source badge taxonomy
@@ -159,6 +160,10 @@ export interface MetricCardProps {
     targetDirection?: 'above' | 'below';
     targetLabel?: string; // e.g. "3.60 target" — shown as subtext next to target value
 
+    // Peer median from metric_baselines — used as fallback classifier when target is not set.
+    // See: PROGRESS.md §M6 (target status rubric)
+    peerMedian?: number | null;
+
     // 14 target-relative dots (index 0 = oldest day). nil = no data.
     trendDots?: TrendDot[];
 
@@ -196,6 +201,7 @@ const MetricCard = React.memo(function MetricCard({
     target,
     targetDirection,
     targetLabel,
+    peerMedian,
     trendDots,
     expandable = false,
     children,
@@ -228,21 +234,28 @@ const MetricCard = React.memo(function MetricCard({
 
     const TrendIcon = isPositive ? TrendingUp : isNegative ? TrendingDown : Minus;
 
-    // Target color coding — only active when target + targetDirection both present.
-    // No target → bare number, no color. Never color-code without an explicit target.
-    let targetColorClass = '';
-    if (target !== null && target !== undefined && targetDirection && value !== null) {
-        const numericValue = parseFloat(value.replace(/[^0-9.-]/g, ''));
-        if (!isNaN(numericValue)) {
-            const isGood =
-                targetDirection === 'above' ? numericValue >= target : numericValue <= target;
-            targetColorClass = isGood ? 'text-green-600' : 'text-red-600';
-        }
+    // Parse value string to numeric for status computation.
+    let numericValue: number | null = null;
+    if (value !== null && value !== undefined) {
+        const parsed = parseFloat(value.replace(/[^0-9.-]/g, ''));
+        if (!isNaN(parsed)) numericValue = parsed;
     }
+
+    // Map targetDirection ('above'/'below') to TargetStatusDirection ('higher_better'/'lower_better').
+    const statusDirection: TargetStatusDirection =
+        targetDirection === 'below' ? 'lower_better' : 'higher_better';
+
+    // Compute 4-level status per §M6: target-based (Excellent/On target/Fair/Poor),
+    // then peer-median fallback (Above/At/Below peers), then no_baseline (neutral).
+    // Only shown when at least one of target / peerMedian is provided.
+    const hasBaseline = (target != null) || (peerMedian != null);
+    const targetStatus = hasBaseline
+        ? computeTargetStatus(numericValue, target, peerMedian, statusDirection)
+        : null;
 
     return (
         <div className="rounded-xl border border-zinc-200 bg-white p-5 space-y-1 shadow-sm hover:shadow-md transition-shadow">
-            {/* Header row: label + info tooltip + why-this-number trigger + source badge */}
+            {/* Header row: label + info tooltip + status dot + source badge */}
             <div className="flex items-center justify-between gap-2">
                 <span className="flex items-center gap-1.5 text-sm font-medium text-zinc-400">
                     {label}
@@ -250,6 +263,14 @@ const MetricCard = React.memo(function MetricCard({
                 </span>
                 <div className="flex items-center gap-1.5">
                     {prefix}
+                    {targetStatus && (
+                        <TargetStatusDot
+                            actual={numericValue}
+                            target={target}
+                            peerMedian={peerMedian}
+                            direction={statusDirection}
+                        />
+                    )}
                     {source && <SourceBadge source={source} />}
                 </div>
             </div>
@@ -258,7 +279,7 @@ const MetricCard = React.memo(function MetricCard({
             <div
                 className={cn(
                     'text-3xl font-bold tabular-nums',
-                    targetColorClass || 'text-zinc-900',
+                    targetStatus?.valueClass || 'text-zinc-900',
                 )}
             >
                 {value ?? 'N/A'}
